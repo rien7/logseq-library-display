@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="420" viewBox="0 0 960 420" role="img" aria-label="Logseq Library Display preview">
+  <rect width="960" height="420" fill="#151515"/>
+  <rect x="72" y="64" width="816" height="292" rx="8" fill="#1f1f1f" stroke="#343434"/>
+  <text x="108" y="126" fill="#e7e7e7" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="28" font-weight="600">Before</text>
+  <text x="108" y="174" fill="#9ca3af" font-family="SFMono-Regular,Menlo,monospace" font-size="26">[[Logseq Library Display]]</text>
+  <line x1="108" y1="214" x2="852" y2="214" stroke="#343434"/>
+  <text x="108" y="270" fill="#e7e7e7" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" font-size="28" font-weight="600">After</text>
+  <text x="108" y="318" fill="#d7e7ff" font-family="SFMono-Regular,Menlo,monospace" font-size="26">[[🧩 Plugin / Logseq Library Display]]</text>
+</svg>
