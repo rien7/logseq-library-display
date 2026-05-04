@@ -60,6 +60,11 @@ type PageView = {
   cssBeforeFontFamily?: string;
 };
 
+type HostMarkerPayload = {
+  version: number;
+  views: PageView[];
+};
+
 type OffHook = (() => void) | { off?: () => void } | undefined;
 
 type ResolvedIcon =
@@ -138,6 +143,8 @@ let dataReady = false;
 let refreshVersion = 0;
 let refreshTimer: number | undefined;
 let renderTimer: number | undefined;
+let renderPulseTimer: number | undefined;
+let renderPulseStopTimer: number | undefined;
 let observer: MutationObserver | undefined;
 let offDbChanged: OffHook;
 let offRouteChanged: OffHook;
@@ -145,7 +152,9 @@ let offSettingsChanged: OffHook;
 let originalTextNodes = new WeakMap<Text, string>();
 let emptyRefreshRetries = 0;
 let startupRefreshTimers: number[] = [];
+let hostMarkerScriptLoad: Promise<void> | undefined;
 const PAGE_SEPARATOR = " / ";
+const HOST_MARKER_KEY = "logseq-library-display-payload";
 
 function hostDocument(): Document {
   try {
@@ -154,6 +163,66 @@ function hostDocument(): Document {
   } catch {
     return document;
   }
+}
+
+function encodePayload(payload: HostMarkerPayload): string {
+  return window.btoa(encodeURIComponent(JSON.stringify(payload)));
+}
+
+function uniqueHostMarkerViews(): PageView[] {
+  const views: PageView[] = [];
+  const seen = new Set<string>();
+
+  for (const view of [
+    ...viewsByUuid.values(),
+    ...viewsById.values(),
+    ...viewsByTitle.values(),
+  ]) {
+    const key =
+      view.pageUuid ??
+      (typeof view.pageId === "number" ? `id:${view.pageId}` : view.title);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    views.push(view);
+  }
+
+  return views;
+}
+
+async function loadHostMarkerScript(): Promise<void> {
+  if (!hostMarkerScriptLoad) {
+    hostMarkerScriptLoad = (async () => {
+      const callApi = logseq._execCallableAPIAsync;
+      const pluginId = logseq.baseInfo?.id ?? "logseq-library-display";
+      const scriptUrl = logseq.resolveResourceFullUrl?.("dist/host-marker.js");
+
+      if (typeof callApi !== "function" || !scriptUrl) {
+        return;
+      }
+
+      await callApi.call(logseq, "exper_load_scripts", pluginId, scriptUrl);
+    })().catch((error: unknown) => {
+      hostMarkerScriptLoad = undefined;
+      console.warn("[logseq-library-display] failed to load host marker", error);
+    });
+  }
+
+  await hostMarkerScriptLoad;
+}
+
+function publishHostMarkerPayload(): void {
+  const payload = encodePayload({
+    version: refreshVersion,
+    views: uniqueHostMarkerViews(),
+  });
+
+  void loadHostMarkerScript().then(() => {
+    logseq.provideUI({
+      key: HOST_MARKER_KEY,
+      path: "body",
+      template: `<div id="${HOST_MARKER_KEY}" style="display:none!important" data-version="${refreshVersion}">${payload}</div>`,
+    });
+  });
 }
 
 function settings(): Required<PluginSettings> {
@@ -1020,6 +1089,8 @@ async function refreshReferenceViews(): Promise<void> {
   styleRulesByKey = nextStyleRules;
   dataReady = true;
   logseq.provideStyle(Array.from(styleRulesByKey.values()).join("\n"));
+  publishHostMarkerPayload();
+  startRenderPulse();
 
   const hasViews =
     viewsById.size > 0 ||
@@ -1132,26 +1203,36 @@ function clearReferenceMetadata(element: Element): void {
   element.classList.remove(PARENTED_CLASS, CONTAINS_PARENTED_CLASS);
 }
 
+function setAttributeIfChanged(element: Element, name: string, value: string): void {
+  if (element.getAttribute(name) !== value) {
+    element.setAttribute(name, value);
+  }
+}
+
 function setOptionalAttribute(element: Element, name: string, value: string | number | undefined): void {
   if (value === undefined || value === "") {
-    element.removeAttribute(name);
+    if (element.hasAttribute(name)) {
+      element.removeAttribute(name);
+    }
     return;
   }
 
-  element.setAttribute(name, String(value));
+  setAttributeIfChanged(element, name, String(value));
 }
 
 function markParentedReference(element: Element, view: PageView): void {
-  element.setAttribute(PARENTED_ATTR, "true");
-  element.classList.add(PARENTED_CLASS);
+  setAttributeIfChanged(element, PARENTED_ATTR, "true");
+  if (!element.classList.contains(PARENTED_CLASS)) {
+    element.classList.add(PARENTED_CLASS);
+  }
   setOptionalAttribute(element, "data-library-display-page-id", view.pageId);
   setOptionalAttribute(element, "data-library-display-page-uuid", view.pageUuid);
   setOptionalAttribute(element, "data-library-display-page-title", view.childTitle);
   setOptionalAttribute(element, "data-library-display-parent-id", view.parentId);
   setOptionalAttribute(element, "data-library-display-parent-uuid", view.parentUuid);
   setOptionalAttribute(element, "data-library-display-parent-title", view.parentTitle);
-  element.setAttribute("data-library-display-title", view.title);
-  element.setAttribute("data-library-display-value", view.display);
+  setAttributeIfChanged(element, "data-library-display-title", view.title);
+  setAttributeIfChanged(element, "data-library-display-value", view.display);
 }
 
 function markParentedReferenceTree(element: Element, view: PageView): void {
@@ -1164,12 +1245,18 @@ function markParentedReferenceTree(element: Element, view: PageView): void {
   }
 }
 
-function markParentedReferenceContainer(node: Node): void {
+function markParentedReferenceContainer(node: Node, view?: PageView): void {
   const parent = node.parentElement;
   if (!parent) return;
 
-  parent.setAttribute(CONTAINS_PARENTED_ATTR, "true");
-  parent.classList.add(CONTAINS_PARENTED_CLASS);
+  setAttributeIfChanged(parent, CONTAINS_PARENTED_ATTR, "true");
+  if (!parent.classList.contains(CONTAINS_PARENTED_CLASS)) {
+    parent.classList.add(CONTAINS_PARENTED_CLASS);
+  }
+
+  if (view) {
+    markParentedReference(parent, view);
+  }
 }
 
 function isReferencePatchTarget(element: Element): boolean {
@@ -1313,11 +1400,17 @@ function viewForTitleInNode(node: Node, title: string): PageView | undefined {
   return undefined;
 }
 
-function replaceBracketedReferences(value: string, node: Node): string {
-  return value.replace(/\[\[\s*([^\]]+?)\s*\]\]/g, (match, title: string) => {
+function replaceBracketedReferences(value: string, node: Node): { text: string; views: PageView[] } {
+  const views: PageView[] = [];
+  const text = value.replace(/\[\[\s*([^\]]+?)\s*\]\]/g, (match, title: string) => {
     const view = viewForTitleInNode(node, title);
-    return view ? match.replace(title, view.display) : match;
+    if (!view) return match;
+
+    views.push(view);
+    return match.replace(title, view.display);
   });
+
+  return { text, views };
 }
 
 function patchTextReference(node: Text): void {
@@ -1328,16 +1421,16 @@ function patchTextReference(node: Text): void {
 
   const bracketed = replaceBracketedReferences(original, node);
 
-  if (bracketed !== original) {
+  if (bracketed.text !== original) {
     if (!originalTextNodes.has(node)) {
       originalTextNodes.set(node, original);
     }
 
-    if (node.textContent !== bracketed) {
-      node.textContent = bracketed;
+    if (node.textContent !== bracketed.text) {
+      node.textContent = bracketed.text;
     }
 
-    markParentedReferenceContainer(node);
+    markParentedReferenceContainer(node, bracketed.views[0]);
     return;
   }
 
@@ -1364,7 +1457,7 @@ function patchTextReference(node: Text): void {
     node.textContent = original.replace(trimmed, view.display);
   }
 
-  markParentedReferenceContainer(node);
+  markParentedReferenceContainer(node, view);
 }
 
 function renderTextReferences(root: ParentNode): void {
@@ -1400,6 +1493,20 @@ function renderReferences(root: ParentNode = hostDocument()): void {
 function scheduleRender(root?: ParentNode): void {
   window.clearTimeout(renderTimer);
   renderTimer = window.setTimeout(() => renderReferences(root ?? hostDocument()), 80);
+}
+
+function stopRenderPulse(): void {
+  window.clearInterval(renderPulseTimer);
+  window.clearTimeout(renderPulseStopTimer);
+  renderPulseTimer = undefined;
+  renderPulseStopTimer = undefined;
+}
+
+function startRenderPulse(duration = 8000): void {
+  stopRenderPulse();
+  renderReferences();
+  renderPulseTimer = window.setInterval(() => renderReferences(), 500);
+  renderPulseStopTimer = window.setTimeout(stopRenderPulse, duration);
 }
 
 function runRefresh(): void {
@@ -1451,15 +1558,15 @@ async function boot(): Promise<void> {
   const host = hostDocument();
   observer = new MutationObserver((mutations) => {
     for (const mutation of mutations) {
-      if (mutation.type === "childList") {
-        scheduleRender(mutation.target instanceof Element ? mutation.target : host);
-        return;
-      }
+      scheduleRender(mutation.target instanceof Element ? mutation.target : host);
+      return;
     }
   });
 
   observer.observe(host.body ?? host.documentElement, {
+    attributes: true,
     childList: true,
+    characterData: true,
     subtree: true,
   });
 
@@ -1491,6 +1598,7 @@ async function boot(): Promise<void> {
     disposeHook(offSettingsChanged);
     window.clearTimeout(refreshTimer);
     window.clearTimeout(renderTimer);
+    stopRenderPulse();
     startupRefreshTimers.forEach((timer) => window.clearTimeout(timer));
   });
 
