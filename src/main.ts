@@ -1057,6 +1057,8 @@ function referenceNameCandidates(value: string): string[] {
 }
 
 function referenceAttributeElements(element: Element): Element[] {
+  if (element.closest("head,script,style")) return [];
+
   return Array.from(
     new Set(
       [
@@ -1170,8 +1172,48 @@ function markParentedReferenceContainer(node: Node): void {
   parent.classList.add(CONTAINS_PARENTED_CLASS);
 }
 
+function isReferencePatchTarget(element: Element): boolean {
+  return !element.closest("head,script,style,textarea,input,[contenteditable='true']");
+}
+
+function directReferenceElements(view: PageView, root: ParentNode): Element[] {
+  const selectors: string[] = [];
+
+  if (view.pageUuid) {
+    selectors.push(`.page-reference[data-ref="${cssAttrValue(view.pageUuid)}"]`);
+  }
+
+  if (typeof view.pageId === "number") {
+    selectors.push(`.page-reference[data-ref="${view.pageId}"]`);
+  }
+
+  if (selectors.length === 0) return [];
+
+  const elements = new Set<Element>();
+
+  for (const wrapper of Array.from(root.querySelectorAll(selectors.join(",")))) {
+    elements.add(wrapper);
+
+    const link = wrapper.querySelector("a.page-ref,.page-ref");
+    if (link) elements.add(link);
+
+    const text = wrapper.querySelector("a.page-ref > span,.page-ref > span");
+    if (text) elements.add(text);
+  }
+
+  return Array.from(elements);
+}
+
+function markDirectReferences(root: ParentNode): void {
+  for (const view of viewsByUuid.values()) {
+    for (const element of directReferenceElements(view, root)) {
+      markParentedReference(element, view);
+    }
+  }
+}
+
 function patchReference(element: Element): void {
-  if (!dataReady || element.closest("textarea,input,[contenteditable='true']")) return;
+  if (!dataReady || !isReferencePatchTarget(element)) return;
 
   const view = viewForElement(element);
   const original = originalText(element);
@@ -1244,7 +1286,7 @@ function isBracketedReferenceText(node: Text, value: string): boolean {
 function shouldPatchTextNode(node: Text, value: string): boolean {
   const parent = node.parentElement;
   if (!parent) return false;
-  if (parent.closest("textarea,input,[contenteditable='true'],script,style")) return false;
+  if (parent.closest("head,textarea,input,[contenteditable='true'],script,style")) return false;
 
   return isBracketedReferenceText(node, value);
 }
@@ -1351,6 +1393,7 @@ function renderReferences(root: ParentNode = hostDocument()): void {
     patchReference(element);
   }
 
+  markDirectReferences(root);
   renderTextReferences(root);
 }
 
