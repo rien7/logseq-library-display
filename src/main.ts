@@ -67,6 +67,9 @@ type ResolvedIcon =
   | { kind: "tabler"; value: string };
 
 const REF_SELECTOR = [
+  ".page-reference[data-ref] a.page-ref > span",
+  ".page-reference[data-ref] .page-ref",
+  ".page-reference[data-ref]",
   "a.page-ref",
   "span.page-ref",
   "a.page-reference",
@@ -86,6 +89,8 @@ const ORIGINAL_ATTR = "data-library-display-original";
 const PATCHED_ATTR = "data-library-display-patched";
 const PARENTED_ATTR = "data-library-display-parented";
 const CONTAINS_PARENTED_ATTR = "data-library-display-contains-parented-reference";
+const PARENTED_CLASS = "library-display-parented-reference";
+const CONTAINS_PARENTED_CLASS = "library-display-contains-parented-reference";
 const METADATA_ATTRS = [
   PARENTED_ATTR,
   CONTAINS_PARENTED_ATTR,
@@ -1051,11 +1056,33 @@ function referenceNameCandidates(value: string): string[] {
   return [clean, last].filter(Boolean);
 }
 
+function referenceAttributeElements(element: Element): Element[] {
+  return Array.from(
+    new Set(
+      [
+        element,
+        element.closest(".page-reference"),
+        element.closest("[data-ref]"),
+        element.closest("[data-ref-name]"),
+        element.closest("[data-page]"),
+        element.closest("[data-page-name]"),
+        element.closest("[data-page-id]"),
+        element.closest("[data-entity-id]"),
+        element.closest("a[href]"),
+      ].filter((value): value is Element => Boolean(value)),
+    ),
+  );
+}
+
 function viewForElement(element: Element): PageView | undefined {
-  const idCandidates = [
-    element.getAttribute("data-page-id"),
-    element.getAttribute("data-entity-id"),
-  ].filter((value): value is string => Boolean(value?.trim()));
+  const sources = referenceAttributeElements(element);
+  const idCandidates = sources
+    .flatMap((source) => [
+      source.getAttribute("data-page-id"),
+      source.getAttribute("data-entity-id"),
+      source.getAttribute("data-ref"),
+    ])
+    .filter((value): value is string => Boolean(value?.trim()));
 
   for (const rawId of idCandidates) {
     const id = Number(rawId);
@@ -1069,11 +1096,14 @@ function viewForElement(element: Element): PageView | undefined {
   }
 
   const textCandidates = [
-    element.getAttribute(ORIGINAL_ATTR),
-    element.getAttribute("data-ref"),
-    element.getAttribute("data-ref-name"),
-    element.getAttribute("data-page"),
-    element.getAttribute("data-page-name"),
+    ...sources.flatMap((source) => [
+      source.getAttribute(ORIGINAL_ATTR),
+      source.getAttribute("data-ref"),
+      source.getAttribute("data-ref-name"),
+      source.getAttribute("data-page"),
+      source.getAttribute("data-page-name"),
+      ...hrefNames(source),
+    ]),
     ...hrefNames(element),
     element.textContent,
   ].filter((value): value is string => Boolean(value?.trim()));
@@ -1096,6 +1126,8 @@ function clearReferenceMetadata(element: Element): void {
   for (const attr of METADATA_ATTRS) {
     element.removeAttribute(attr);
   }
+
+  element.classList.remove(PARENTED_CLASS, CONTAINS_PARENTED_CLASS);
 }
 
 function setOptionalAttribute(element: Element, name: string, value: string | number | undefined): void {
@@ -1109,6 +1141,7 @@ function setOptionalAttribute(element: Element, name: string, value: string | nu
 
 function markParentedReference(element: Element, view: PageView): void {
   element.setAttribute(PARENTED_ATTR, "true");
+  element.classList.add(PARENTED_CLASS);
   setOptionalAttribute(element, "data-library-display-page-id", view.pageId);
   setOptionalAttribute(element, "data-library-display-page-uuid", view.pageUuid);
   setOptionalAttribute(element, "data-library-display-page-title", view.childTitle);
@@ -1119,8 +1152,22 @@ function markParentedReference(element: Element, view: PageView): void {
   element.setAttribute("data-library-display-value", view.display);
 }
 
+function markParentedReferenceTree(element: Element, view: PageView): void {
+  markParentedReference(element, view);
+
+  for (const parent of [element.closest("a.page-ref"), element.closest(".page-reference")]) {
+    if (parent && parent !== element) {
+      markParentedReference(parent, view);
+    }
+  }
+}
+
 function markParentedReferenceContainer(node: Node): void {
-  node.parentElement?.setAttribute(CONTAINS_PARENTED_ATTR, "true");
+  const parent = node.parentElement;
+  if (!parent) return;
+
+  parent.setAttribute(CONTAINS_PARENTED_ATTR, "true");
+  parent.classList.add(CONTAINS_PARENTED_CLASS);
 }
 
 function patchReference(element: Element): void {
@@ -1150,7 +1197,7 @@ function patchReference(element: Element): void {
 
   element.setAttribute(PATCHED_ATTR, "true");
   element.setAttribute("title", view.title);
-  markParentedReference(element, view);
+  markParentedReferenceTree(element, view);
 }
 
 function compact(value: string): string {
@@ -1260,6 +1307,7 @@ function patchTextReference(node: Text): void {
       node.textContent = originalTextNodes.get(node) ?? node.textContent;
       originalTextNodes.delete(node);
       node.parentElement?.removeAttribute(CONTAINS_PARENTED_ATTR);
+      node.parentElement?.classList.remove(CONTAINS_PARENTED_CLASS);
     }
     return;
   }
