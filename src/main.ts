@@ -49,6 +49,12 @@ type PageEntity = {
 type PageView = {
   display: string;
   title: string;
+  parentTitle: string;
+  childTitle: string;
+  pageId?: number;
+  pageUuid?: string;
+  parentId?: number;
+  parentUuid?: string;
   cssBefore?: string;
   cssAfter?: string;
   cssBeforeFontFamily?: string;
@@ -78,6 +84,20 @@ const REF_SELECTOR = [
 
 const ORIGINAL_ATTR = "data-library-display-original";
 const PATCHED_ATTR = "data-library-display-patched";
+const PARENTED_ATTR = "data-library-display-parented";
+const CONTAINS_PARENTED_ATTR = "data-library-display-contains-parented-reference";
+const METADATA_ATTRS = [
+  PARENTED_ATTR,
+  CONTAINS_PARENTED_ATTR,
+  "data-library-display-page-id",
+  "data-library-display-page-uuid",
+  "data-library-display-page-title",
+  "data-library-display-parent-id",
+  "data-library-display-parent-uuid",
+  "data-library-display-parent-title",
+  "data-library-display-title",
+  "data-library-display-value",
+];
 const CURRENT_PAGE_BLOCKS_QUERY = `
 [:find (pull ?b [* {:block/refs [* {:block/parent [*]}]}])
  :in $ ?page
@@ -403,12 +423,21 @@ function pageView(page: PageEntity, parent: PageEntity): PageView {
   const text = `${parentTitle}${PAGE_SEPARATOR}${childTitle}`;
   const icon = parentIcon(parent);
   const mode = settings().displayMode;
+  const metadata = {
+    parentTitle,
+    childTitle,
+    pageId: dbId(page),
+    pageUuid: entityUuidValue(page),
+    parentId: dbId(parent),
+    parentUuid: entityUuidValue(parent),
+  };
 
   if (mode === "Icon" && icon) {
     if (icon.kind === "tabler") {
       return {
         display: text,
         title: text,
+        ...metadata,
         cssBefore: icon.value,
         cssAfter: `${PAGE_SEPARATOR}${childTitle}`,
         cssBeforeFontFamily: "tabler-icons",
@@ -418,6 +447,7 @@ function pageView(page: PageEntity, parent: PageEntity): PageView {
     return {
       display: `${icon.value}${PAGE_SEPARATOR}${childTitle}`,
       title: text,
+      ...metadata,
       cssBefore: `${icon.value}${PAGE_SEPARATOR}${childTitle}`,
     };
   }
@@ -427,6 +457,7 @@ function pageView(page: PageEntity, parent: PageEntity): PageView {
       return {
         display: text,
         title: text,
+        ...metadata,
         cssBefore: icon.value,
         cssAfter: ` ${text}`,
         cssBeforeFontFamily: "tabler-icons",
@@ -436,11 +467,12 @@ function pageView(page: PageEntity, parent: PageEntity): PageView {
     return {
       display: `${icon.value} ${text}`,
       title: text,
+      ...metadata,
       cssBefore: `${icon.value} ${text}`,
     };
   }
 
-  return { display: text, title: text, cssBefore: text };
+  return { display: text, title: text, ...metadata, cssBefore: text };
 }
 
 function pagePrefix(page: PageEntity, parent: PageEntity): string {
@@ -1060,6 +1092,37 @@ function originalText(element: Element): string {
   return element.getAttribute(ORIGINAL_ATTR) || element.textContent?.trim() || "";
 }
 
+function clearReferenceMetadata(element: Element): void {
+  for (const attr of METADATA_ATTRS) {
+    element.removeAttribute(attr);
+  }
+}
+
+function setOptionalAttribute(element: Element, name: string, value: string | number | undefined): void {
+  if (value === undefined || value === "") {
+    element.removeAttribute(name);
+    return;
+  }
+
+  element.setAttribute(name, String(value));
+}
+
+function markParentedReference(element: Element, view: PageView): void {
+  element.setAttribute(PARENTED_ATTR, "true");
+  setOptionalAttribute(element, "data-library-display-page-id", view.pageId);
+  setOptionalAttribute(element, "data-library-display-page-uuid", view.pageUuid);
+  setOptionalAttribute(element, "data-library-display-page-title", view.childTitle);
+  setOptionalAttribute(element, "data-library-display-parent-id", view.parentId);
+  setOptionalAttribute(element, "data-library-display-parent-uuid", view.parentUuid);
+  setOptionalAttribute(element, "data-library-display-parent-title", view.parentTitle);
+  element.setAttribute("data-library-display-title", view.title);
+  element.setAttribute("data-library-display-value", view.display);
+}
+
+function markParentedReferenceContainer(node: Node): void {
+  node.parentElement?.setAttribute(CONTAINS_PARENTED_ATTR, "true");
+}
+
 function patchReference(element: Element): void {
   if (!dataReady || element.closest("textarea,input,[contenteditable='true']")) return;
 
@@ -1067,6 +1130,8 @@ function patchReference(element: Element): void {
   const original = originalText(element);
 
   if (!view) {
+    clearReferenceMetadata(element);
+
     if (element.getAttribute(PATCHED_ATTR) === "true") {
       element.textContent = original;
       element.removeAttribute(PATCHED_ATTR);
@@ -1085,6 +1150,7 @@ function patchReference(element: Element): void {
 
   element.setAttribute(PATCHED_ATTR, "true");
   element.setAttribute("title", view.title);
+  markParentedReference(element, view);
 }
 
 function compact(value: string): string {
@@ -1182,6 +1248,7 @@ function patchTextReference(node: Text): void {
       node.textContent = bracketed;
     }
 
+    markParentedReferenceContainer(node);
     return;
   }
 
@@ -1192,6 +1259,7 @@ function patchTextReference(node: Text): void {
     if (originalTextNodes.has(node)) {
       node.textContent = originalTextNodes.get(node) ?? node.textContent;
       originalTextNodes.delete(node);
+      node.parentElement?.removeAttribute(CONTAINS_PARENTED_ATTR);
     }
     return;
   }
@@ -1205,6 +1273,8 @@ function patchTextReference(node: Text): void {
   if (node.textContent?.trim() !== view.display) {
     node.textContent = original.replace(trimmed, view.display);
   }
+
+  markParentedReferenceContainer(node);
 }
 
 function renderTextReferences(root: ParentNode): void {
