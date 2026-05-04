@@ -27,8 +27,13 @@
 
   var state = {
     views: [],
+    byId: {},
+    byUuid: {},
+    byTitle: {},
     timer: 0,
     marking: false,
+    needsClear: false,
+    lastSignature: "",
     pulseTimer: 0,
     pulseStopTimer: 0,
   };
@@ -63,13 +68,34 @@
     return JSON.parse(decodeURIComponent(window.atob(value.trim())));
   }
 
+  function payloadElement() {
+    return (
+      document.getElementById(PAYLOAD_ID) ||
+      document.querySelector('[data-injected-ui$="--' + PAYLOAD_ID + '"]') ||
+      document.querySelector('[id$="--' + PAYLOAD_ID + '"]')
+    );
+  }
+
+  function isPayloadElement(node) {
+    return (
+      node &&
+      node.nodeType === 1 &&
+      (node.id === PAYLOAD_ID ||
+        node.id === "logseq-library-display--" + PAYLOAD_ID ||
+        String(node.getAttribute("data-injected-ui") || "").endsWith("--" + PAYLOAD_ID))
+    );
+  }
+
   function readPayload() {
-    var element = document.getElementById(PAYLOAD_ID);
+    var element = payloadElement();
     if (!element) return;
 
     try {
       var payload = decodePayload(element.textContent || "");
       state.views = Array.isArray(payload.views) ? payload.views : [];
+      rebuildIndexes();
+      state.needsClear = true;
+      state.lastSignature = "";
       scheduleMark();
       startPulse();
     } catch (error) {
@@ -77,27 +103,41 @@
     }
   }
 
-  function attr(value) {
-    return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-  }
-
-  function query(selector) {
-    try {
-      return Array.prototype.slice.call(document.querySelectorAll(selector));
-    } catch (_) {
-      return [];
-    }
-  }
-
-  function addMatches(matches, selector) {
-    var elements = query(selector);
-    for (var i = 0; i < elements.length; i += 1) {
-      matches.push(elements[i]);
-    }
-  }
-
   function lower(value) {
     return String(value).trim().toLocaleLowerCase();
+  }
+
+  function addTitle(view, value) {
+    var title = String(value || "").trim();
+    if (!title) return;
+
+    state.byTitle[lower(title)] = view;
+
+    var parts = title.split("/");
+    if (parts.length > 1) {
+      state.byTitle[lower(parts[parts.length - 1])] = view;
+    }
+  }
+
+  function rebuildIndexes() {
+    state.byId = {};
+    state.byUuid = {};
+    state.byTitle = {};
+
+    for (var i = 0; i < state.views.length; i += 1) {
+      var view = state.views[i];
+
+      if (view.pageUuid) {
+        state.byUuid[String(view.pageUuid)] = view;
+      }
+
+      if (view.pageId !== undefined && view.pageId !== null) {
+        state.byId[String(view.pageId)] = view;
+      }
+
+      addTitle(view, view.title);
+      addTitle(view, view.childTitle);
+    }
   }
 
   function titleVariants(view) {
@@ -126,40 +166,14 @@
     });
   }
 
-  function matchesForView(view) {
-    var matches = [];
-
-    if (view.pageUuid) {
-      addMatches(matches, "[data-ref=\"" + attr(view.pageUuid) + "\"]");
-      addMatches(matches, "[data-page-uuid=\"" + attr(view.pageUuid) + "\"]");
-      addMatches(matches, "[data-block-uuid=\"" + attr(view.pageUuid) + "\"]");
-    }
-
-    if (view.pageId !== undefined && view.pageId !== null) {
-      addMatches(matches, "[data-ref=\"" + attr(view.pageId) + "\"]");
-      addMatches(matches, "[data-page-id=\"" + attr(view.pageId) + "\"]");
-      addMatches(matches, "[data-entity-id=\"" + attr(view.pageId) + "\"]");
-    }
-
-    var titles = titleVariants(view);
-    for (var i = 0; i < titles.length; i += 1) {
-      addMatches(matches, "a.page-ref[data-ref=\"" + attr(titles[i]) + "\"]");
-      addMatches(matches, "span.page-ref[data-ref=\"" + attr(titles[i]) + "\"]");
-      addMatches(matches, ".page-reference[data-ref=\"" + attr(titles[i]) + "\"]");
-      addMatches(matches, "[data-ref-name=\"" + attr(titles[i]) + "\"]");
-      addMatches(matches, "[data-page=\"" + attr(titles[i]) + "\"]");
-      addMatches(matches, "[data-page-name=\"" + attr(titles[i]) + "\"]");
-    }
-
-    return Array.prototype.filter.call(matches, function (element, index) {
-      return matches.indexOf(element) === index;
-    });
-  }
-
   function markReference(element, view) {
     var targets = [element];
-    var pageReference = element.closest(".page-reference[data-ref], .page-reference");
-    var pageRef = element.closest("a.page-ref, span.page-ref, .page-ref");
+    var pageReference = element.matches(".page-reference")
+      ? element
+      : element.closest(".page-reference[data-ref], .page-reference");
+    var pageRef = element.matches(".page-ref")
+      ? element
+      : element.closest("a.page-ref, span.page-ref, .page-ref");
 
     if (pageReference) targets.push(pageReference);
     if (pageRef) targets.push(pageRef);
@@ -189,17 +203,106 @@
     }
   }
 
+  function referenceElements() {
+    var nativeReferences = document.querySelectorAll(
+      ".page-reference[data-ref],a.page-ref[data-ref],span.page-ref[data-ref]," +
+        ".page-ref[data-ref],[data-testid='page-ref'][data-ref]",
+    );
+    if (nativeReferences.length > 0) return nativeReferences;
+
+    return document.querySelectorAll("[data-ref-name],[data-page-id],[data-entity-id]");
+  }
+
+  function attributeValues(element) {
+    return [
+      element.getAttribute("data-ref"),
+      element.getAttribute("data-page-uuid"),
+      element.getAttribute("data-block-uuid"),
+      element.getAttribute("data-page-id"),
+      element.getAttribute("data-entity-id"),
+      element.getAttribute("data-ref-name"),
+      element.getAttribute("data-page"),
+      element.getAttribute("data-page-name"),
+    ].filter(function (value) {
+      return value && String(value).trim();
+    });
+  }
+
+  function viewForElement(element) {
+    var sources = [element];
+    var pageReference = element.matches(".page-reference")
+      ? element
+      : element.closest(".page-reference[data-ref], .page-reference");
+    var pageRef = element.matches(".page-ref")
+      ? element
+      : element.closest("a.page-ref, span.page-ref, .page-ref");
+
+    if (pageReference && pageReference !== element) sources.push(pageReference);
+    if (pageRef && pageRef !== element) sources.push(pageRef);
+
+    for (var i = 0; i < sources.length; i += 1) {
+      var values = attributeValues(sources[i]);
+
+      for (var j = 0; j < values.length; j += 1) {
+        var value = String(values[j]).trim();
+        var byUuid = state.byUuid[value];
+        if (byUuid) return byUuid;
+
+        var byId = state.byId[value];
+        if (byId) return byId;
+      }
+
+      for (var k = 0; k < values.length; k += 1) {
+        var byTitle = state.byTitle[lower(values[k])];
+        if (byTitle) return byTitle;
+      }
+    }
+
+    return undefined;
+  }
+
+  function elementSignature(element) {
+    return attributeValues(element).join("|");
+  }
+
+  function signatureForElements(elements) {
+    var values = [String(state.views.length)];
+    for (var i = 0; i < elements.length; i += 1) {
+      values.push(elementSignature(elements[i]));
+    }
+    return values.join(";");
+  }
+
+  function hasUnmarkedReference(elements) {
+    for (var i = 0; i < elements.length; i += 1) {
+      if (!elements[i].hasAttribute(PARENTED_ATTR) && viewForElement(elements[i])) return true;
+    }
+    return false;
+  }
+
   function mark() {
     state.marking = true;
     try {
-      clearMarkedElements();
-      for (var i = 0; i < state.views.length; i += 1) {
-        var view = state.views[i];
-        var matches = matchesForView(view);
-        for (var j = 0; j < matches.length; j += 1) {
-          markReference(matches[j], view);
-        }
+      var elements = referenceElements();
+      var signature = signatureForElements(elements);
+      if (
+        !state.needsClear &&
+        signature === state.lastSignature &&
+        !hasUnmarkedReference(elements)
+      ) {
+        return;
       }
+
+      if (state.needsClear) {
+        clearMarkedElements();
+        state.needsClear = false;
+      }
+
+      for (var i = 0; i < elements.length; i += 1) {
+        var view = viewForElement(elements[i]);
+        if (view) markReference(elements[i], view);
+      }
+      state.lastSignature = signature;
     } finally {
       window.setTimeout(function () {
         state.marking = false;
@@ -215,11 +318,11 @@
   function startPulse() {
     window.clearInterval(state.pulseTimer);
     window.clearTimeout(state.pulseStopTimer);
-    state.pulseTimer = window.setInterval(mark, 500);
+    state.pulseTimer = window.setInterval(mark, 700);
     state.pulseStopTimer = window.setTimeout(function () {
       window.clearInterval(state.pulseTimer);
       state.pulseTimer = 0;
-    }, 8000);
+    }, 4000);
   }
 
   var observer = new MutationObserver(function (mutations) {
@@ -227,7 +330,7 @@
 
     for (var i = 0; i < mutations.length; i += 1) {
       var mutation = mutations[i];
-      if (mutation.target && mutation.target.id === PAYLOAD_ID) {
+      if (isPayloadElement(mutation.target)) {
         readPayload();
         return;
       }
@@ -235,7 +338,7 @@
       if (mutation.type === "childList") {
         for (var j = 0; j < mutation.addedNodes.length; j += 1) {
           var node = mutation.addedNodes[j];
-          if (node.nodeType === 1 && node.id === PAYLOAD_ID) {
+          if (isPayloadElement(node)) {
             readPayload();
             return;
           }
@@ -245,17 +348,18 @@
       }
 
       if (
-        mutation.type === "attributes" &&
-        !String(mutation.attributeName || "").startsWith("data-library-display")
+        mutation.type === "characterData" &&
+        mutation.target &&
+        mutation.target.parentElement &&
+        isPayloadElement(mutation.target.parentElement)
       ) {
-        scheduleMark();
+        readPayload();
         return;
       }
     }
   });
 
   observer.observe(document.documentElement, {
-    attributes: true,
     childList: true,
     characterData: true,
     subtree: true,
@@ -269,6 +373,7 @@
       window.clearTimeout(state.timer);
       window.clearInterval(state.pulseTimer);
       window.clearTimeout(state.pulseStopTimer);
+      state.lastSignature = "";
       clearMarkedElements();
       delete window.__logseqLibraryDisplayHostMarker;
     },

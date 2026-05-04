@@ -71,43 +71,6 @@ type ResolvedIcon =
   | { kind: "emoji"; value: string }
   | { kind: "tabler"; value: string };
 
-const REF_SELECTOR = [
-  ".page-reference[data-ref] a.page-ref > span",
-  ".page-reference[data-ref] .page-ref",
-  ".page-reference[data-ref]",
-  "a.page-ref",
-  "span.page-ref",
-  "a.page-reference",
-  "span.page-reference",
-  "[data-testid='page-ref']",
-  "[data-ref]",
-  "[data-ref-name]",
-  "[data-page]",
-  "[data-page-name]",
-  "[data-page-id]",
-  "[data-entity-id]",
-  "a[href*='/page/']",
-  "a[href*='page=']",
-].join(",");
-
-const ORIGINAL_ATTR = "data-library-display-original";
-const PATCHED_ATTR = "data-library-display-patched";
-const PARENTED_ATTR = "data-library-display-parented";
-const CONTAINS_PARENTED_ATTR = "data-library-display-contains-parented-reference";
-const PARENTED_CLASS = "library-display-parented-reference";
-const CONTAINS_PARENTED_CLASS = "library-display-contains-parented-reference";
-const METADATA_ATTRS = [
-  PARENTED_ATTR,
-  CONTAINS_PARENTED_ATTR,
-  "data-library-display-page-id",
-  "data-library-display-page-uuid",
-  "data-library-display-page-title",
-  "data-library-display-parent-id",
-  "data-library-display-parent-uuid",
-  "data-library-display-parent-title",
-  "data-library-display-title",
-  "data-library-display-value",
-];
 const CURRENT_PAGE_BLOCKS_QUERY = `
 [:find (pull ?b [* {:block/refs [* {:block/parent [*]}]}])
  :in $ ?page
@@ -137,19 +100,14 @@ const ENTITIES_WITH_PARENT_QUERY = `
 let viewsById = new Map<number, PageView>();
 let viewsByUuid = new Map<string, PageView>();
 let viewsByTitle = new Map<string, PageView>();
-let viewsByBlockTitle = new Map<string, Map<string, PageView>>();
 let styleRulesByKey = new Map<string, string>();
+let hostMarkerViews: PageView[] = [];
 let dataReady = false;
 let refreshVersion = 0;
 let refreshTimer: number | undefined;
-let renderTimer: number | undefined;
-let renderPulseTimer: number | undefined;
-let renderPulseStopTimer: number | undefined;
-let observer: MutationObserver | undefined;
 let offDbChanged: OffHook;
 let offRouteChanged: OffHook;
 let offSettingsChanged: OffHook;
-let originalTextNodes = new WeakMap<Text, string>();
 let emptyRefreshRetries = 0;
 let startupRefreshTimers: number[] = [];
 let hostMarkerScriptLoad: Promise<void> | undefined;
@@ -173,11 +131,7 @@ function uniqueHostMarkerViews(): PageView[] {
   const views: PageView[] = [];
   const seen = new Set<string>();
 
-  for (const view of [
-    ...viewsByUuid.values(),
-    ...viewsById.values(),
-    ...viewsByTitle.values(),
-  ]) {
+  for (const view of hostMarkerViews) {
     const key =
       view.pageUuid ??
       (typeof view.pageId === "number" ? `id:${view.pageId}` : view.title);
@@ -189,12 +143,27 @@ function uniqueHostMarkerViews(): PageView[] {
   return views;
 }
 
+function addHostMarkerView(views: Map<string, PageView>, view: PageView): void {
+  const key =
+    view.pageUuid ??
+    (typeof view.pageId === "number" ? `id:${view.pageId}` : view.title);
+
+  if (!views.has(key)) {
+    views.set(key, view);
+  }
+}
+
 async function loadHostMarkerScript(): Promise<void> {
   if (!hostMarkerScriptLoad) {
     hostMarkerScriptLoad = (async () => {
       const callApi = logseq._execCallableAPIAsync;
       const pluginId = logseq.baseInfo?.id ?? "logseq-library-display";
-      const scriptUrl = logseq.resolveResourceFullUrl?.("dist/host-marker.js");
+      const resolvedScriptUrl = logseq.resolveResourceFullUrl?.("dist/host-marker.js");
+      const scriptUrl = resolvedScriptUrl
+        ? `${resolvedScriptUrl}${resolvedScriptUrl.includes("?") ? "&" : "?"}v=${encodeURIComponent(
+            String(refreshVersion),
+          )}`
+        : undefined;
 
       if (typeof callApi !== "function" || !scriptUrl) {
         return;
@@ -636,34 +605,6 @@ function blockScopeSelectors(block: PageEntity): string[] {
   return selectors;
 }
 
-function blockKeys(block: PageEntity): string[] {
-  const keys = new Set<string>();
-  const id = dbId(block);
-  const uuid = entityUuidValue(block);
-
-  if (uuid) keys.add(uuid);
-  if (typeof id === "number") keys.add(String(id));
-
-  return Array.from(keys);
-}
-
-function closestBlockKey(node: Node): string | undefined {
-  const element =
-    node instanceof Element ? node : node.parentElement;
-  const block = element?.closest(
-    "[blockid],[data-blockid],[data-block-id],[data-block-uuid],[data-uuid]",
-  );
-
-  return (
-    block?.getAttribute("blockid") ??
-    block?.getAttribute("data-blockid") ??
-    block?.getAttribute("data-block-id") ??
-    block?.getAttribute("data-block-uuid") ??
-    block?.getAttribute("data-uuid") ??
-    undefined
-  );
-}
-
 function visibleBlockUuids(): string[] {
   const document = hostDocument();
   const uuids = new Set<string>();
@@ -674,44 +615,6 @@ function visibleBlockUuids(): string[] {
   }
 
   return Array.from(uuids);
-}
-
-function addBlockTitleView(
-  block: PageEntity,
-  page: PageEntity,
-  view: PageView,
-  nextByBlockTitle: Map<string, Map<string, PageView>>,
-  blockTitleConflicts: Map<string, Set<string>>,
-): void {
-  for (const blockKey of blockKeys(block)) {
-    let blockViews = nextByBlockTitle.get(blockKey);
-    if (!blockViews) {
-      blockViews = new Map<string, PageView>();
-      nextByBlockTitle.set(blockKey, blockViews);
-    }
-
-    let conflicts = blockTitleConflicts.get(blockKey);
-    if (!conflicts) {
-      conflicts = new Set<string>();
-      blockTitleConflicts.set(blockKey, conflicts);
-    }
-
-    for (const title of pageTitleCandidates(page)) {
-      for (const candidate of [title, lastPathSegment(title)]) {
-        const key = normalizeTitle(candidate);
-        if (!key || conflicts.has(key)) continue;
-
-        const existing = blockViews.get(key);
-        if (existing && existing.title !== view.title) {
-          blockViews.delete(key);
-          conflicts.add(key);
-          continue;
-        }
-
-        blockViews.set(key, view);
-      }
-    }
-  }
 }
 
 function encodedTitleValues(title: string): string[] {
@@ -1013,10 +916,9 @@ async function refreshReferenceViews(): Promise<void> {
   const nextById = new Map<number, PageView>();
   const nextByUuid = new Map<string, PageView>();
   const nextByTitle = new Map<string, PageView>();
-  const nextByBlockTitle = new Map<string, Map<string, PageView>>();
   const nextStyleRules = new Map<string, string>();
+  const nextHostMarkerViews = new Map<string, PageView>();
   const titleConflicts = new Set<string>();
-  const blockTitleConflicts = new Map<string, Set<string>>();
   const entityCache = new Map<string, Promise<PageEntity | undefined>>();
 
   if (currentPage) {
@@ -1030,15 +932,10 @@ async function refreshReferenceViews(): Promise<void> {
         const parent = await parentForEntity(referenced, entityCache);
         if (!parent) continue;
 
-        addView(referenced, pageView(referenced, parent), nextById, nextByUuid, nextByTitle, titleConflicts);
+        const view = pageView(referenced, parent);
+        addView(referenced, view, nextById, nextByUuid, nextByTitle, titleConflicts);
+        addHostMarkerView(nextHostMarkerViews, view);
         addPageReferenceTextRule(referenced, parent, nextStyleRules);
-        addBlockTitleView(
-          block,
-          referenced,
-          pageView(referenced, parent),
-          nextByBlockTitle,
-          blockTitleConflicts,
-        );
       }
     }
   }
@@ -1053,14 +950,8 @@ async function refreshReferenceViews(): Promise<void> {
 
       const view = pageView(referenced, parent);
       addView(referenced, view, nextById, nextByUuid, nextByTitle, titleConflicts);
+      addHostMarkerView(nextHostMarkerViews, view);
       addPageReferenceTextRule(referenced, parent, nextStyleRules);
-      addBlockTitleView(
-        block,
-        referenced,
-        view,
-        nextByBlockTitle,
-        blockTitleConflicts,
-      );
     }
   }
 
@@ -1073,7 +964,9 @@ async function refreshReferenceViews(): Promise<void> {
       const parent = parentRef(entity) as PageEntity | undefined;
       if (!parent || !pageTitle(parent)) continue;
 
-      addView(entity, pageView(entity, parent), nextById, nextByUuid, nextByTitle, titleConflicts);
+      const view = pageView(entity, parent);
+      addView(entity, view, nextById, nextByUuid, nextByTitle, titleConflicts);
+      addHostMarkerView(nextHostMarkerViews, view);
       addPageReferenceTextRule(entity, parent, nextStyleRules);
     }
   } catch (error) {
@@ -1085,18 +978,16 @@ async function refreshReferenceViews(): Promise<void> {
   viewsById = nextById;
   viewsByUuid = nextByUuid;
   viewsByTitle = nextByTitle;
-  viewsByBlockTitle = nextByBlockTitle;
   styleRulesByKey = nextStyleRules;
+  hostMarkerViews = Array.from(nextHostMarkerViews.values());
   dataReady = true;
   logseq.provideStyle(Array.from(styleRulesByKey.values()).join("\n"));
   publishHostMarkerPayload();
-  startRenderPulse();
 
   const hasViews =
     viewsById.size > 0 ||
     viewsByUuid.size > 0 ||
-    viewsByTitle.size > 0 ||
-    viewsByBlockTitle.size > 0;
+    viewsByTitle.size > 0;
 
   if (!hasViews && emptyRefreshRetries < 5) {
     emptyRefreshRetries += 1;
@@ -1106,413 +997,9 @@ async function refreshReferenceViews(): Promise<void> {
   }
 }
 
-function hrefNames(element: Element): string[] {
-  const href = element.getAttribute("href");
-  if (!href) return [];
-
-  const decoded = decodeURIComponent(href);
-  const values: string[] = [];
-  const pageParam = decoded.match(/[?&]page=([^&]+)/)?.[1];
-  const pagePath = decoded.match(/\/page\/([^?#]+)/)?.[1];
-
-  if (pageParam) values.push(pageParam);
-  if (pagePath) values.push(pagePath);
-
-  return values;
-}
-
-function referenceNameCandidates(value: string): string[] {
-  const clean = value.trim().replace(/^#+/, "");
-  const last = lastPathSegment(clean);
-  return [clean, last].filter(Boolean);
-}
-
-function referenceAttributeElements(element: Element): Element[] {
-  if (element.closest("head,script,style")) return [];
-
-  return Array.from(
-    new Set(
-      [
-        element,
-        element.closest(".page-reference"),
-        element.closest("[data-ref]"),
-        element.closest("[data-ref-name]"),
-        element.closest("[data-page]"),
-        element.closest("[data-page-name]"),
-        element.closest("[data-page-id]"),
-        element.closest("[data-entity-id]"),
-        element.closest("a[href]"),
-      ].filter((value): value is Element => Boolean(value)),
-    ),
-  );
-}
-
-function viewForElement(element: Element): PageView | undefined {
-  const sources = referenceAttributeElements(element);
-  const idCandidates = sources
-    .flatMap((source) => [
-      source.getAttribute("data-page-id"),
-      source.getAttribute("data-entity-id"),
-      source.getAttribute("data-ref"),
-    ])
-    .filter((value): value is string => Boolean(value?.trim()));
-
-  for (const rawId of idCandidates) {
-    const id = Number(rawId);
-    if (Number.isFinite(id)) {
-      const view = viewsById.get(id);
-      if (view) return view;
-    }
-
-    const uuidView = viewsByUuid.get(rawId.trim());
-    if (uuidView) return uuidView;
-  }
-
-  const textCandidates = [
-    ...sources.flatMap((source) => [
-      source.getAttribute(ORIGINAL_ATTR),
-      source.getAttribute("data-ref"),
-      source.getAttribute("data-ref-name"),
-      source.getAttribute("data-page"),
-      source.getAttribute("data-page-name"),
-      ...hrefNames(source),
-    ]),
-    ...hrefNames(element),
-    element.textContent,
-  ].filter((value): value is string => Boolean(value?.trim()));
-
-  for (const raw of textCandidates) {
-    for (const candidate of referenceNameCandidates(raw)) {
-      const view = viewsByTitle.get(normalizeTitle(candidate));
-      if (view) return view;
-    }
-  }
-
-  return undefined;
-}
-
-function originalText(element: Element): string {
-  return element.getAttribute(ORIGINAL_ATTR) || element.textContent?.trim() || "";
-}
-
-function clearReferenceMetadata(element: Element): void {
-  for (const attr of METADATA_ATTRS) {
-    element.removeAttribute(attr);
-  }
-
-  element.classList.remove(PARENTED_CLASS, CONTAINS_PARENTED_CLASS);
-}
-
-function setAttributeIfChanged(element: Element, name: string, value: string): void {
-  if (element.getAttribute(name) !== value) {
-    element.setAttribute(name, value);
-  }
-}
-
-function setOptionalAttribute(element: Element, name: string, value: string | number | undefined): void {
-  if (value === undefined || value === "") {
-    if (element.hasAttribute(name)) {
-      element.removeAttribute(name);
-    }
-    return;
-  }
-
-  setAttributeIfChanged(element, name, String(value));
-}
-
-function markParentedReference(element: Element, view: PageView): void {
-  setAttributeIfChanged(element, PARENTED_ATTR, "true");
-  if (!element.classList.contains(PARENTED_CLASS)) {
-    element.classList.add(PARENTED_CLASS);
-  }
-  setOptionalAttribute(element, "data-library-display-page-id", view.pageId);
-  setOptionalAttribute(element, "data-library-display-page-uuid", view.pageUuid);
-  setOptionalAttribute(element, "data-library-display-page-title", view.childTitle);
-  setOptionalAttribute(element, "data-library-display-parent-id", view.parentId);
-  setOptionalAttribute(element, "data-library-display-parent-uuid", view.parentUuid);
-  setOptionalAttribute(element, "data-library-display-parent-title", view.parentTitle);
-  setAttributeIfChanged(element, "data-library-display-title", view.title);
-  setAttributeIfChanged(element, "data-library-display-value", view.display);
-}
-
-function markParentedReferenceTree(element: Element, view: PageView): void {
-  markParentedReference(element, view);
-
-  for (const parent of [element.closest("a.page-ref"), element.closest(".page-reference")]) {
-    if (parent && parent !== element) {
-      markParentedReference(parent, view);
-    }
-  }
-}
-
-function markParentedReferenceContainer(node: Node, view?: PageView): void {
-  const parent = node.parentElement;
-  if (!parent) return;
-
-  setAttributeIfChanged(parent, CONTAINS_PARENTED_ATTR, "true");
-  if (!parent.classList.contains(CONTAINS_PARENTED_CLASS)) {
-    parent.classList.add(CONTAINS_PARENTED_CLASS);
-  }
-
-  if (view) {
-    markParentedReference(parent, view);
-  }
-}
-
-function isReferencePatchTarget(element: Element): boolean {
-  return !element.closest("head,script,style,textarea,input,[contenteditable='true']");
-}
-
-function directReferenceElements(view: PageView, root: ParentNode): Element[] {
-  const selectors: string[] = [];
-
-  if (view.pageUuid) {
-    selectors.push(`.page-reference[data-ref="${cssAttrValue(view.pageUuid)}"]`);
-  }
-
-  if (typeof view.pageId === "number") {
-    selectors.push(`.page-reference[data-ref="${view.pageId}"]`);
-  }
-
-  if (selectors.length === 0) return [];
-
-  const elements = new Set<Element>();
-
-  for (const wrapper of Array.from(root.querySelectorAll(selectors.join(",")))) {
-    elements.add(wrapper);
-
-    const link = wrapper.querySelector("a.page-ref,.page-ref");
-    if (link) elements.add(link);
-
-    const text = wrapper.querySelector("a.page-ref > span,.page-ref > span");
-    if (text) elements.add(text);
-  }
-
-  return Array.from(elements);
-}
-
-function markDirectReferences(root: ParentNode): void {
-  for (const view of viewsByUuid.values()) {
-    for (const element of directReferenceElements(view, root)) {
-      markParentedReference(element, view);
-    }
-  }
-}
-
-function patchReference(element: Element): void {
-  if (!dataReady || !isReferencePatchTarget(element)) return;
-
-  const view = viewForElement(element);
-  const original = originalText(element);
-
-  if (!view) {
-    clearReferenceMetadata(element);
-
-    if (element.getAttribute(PATCHED_ATTR) === "true") {
-      element.textContent = original;
-      element.removeAttribute(PATCHED_ATTR);
-      element.removeAttribute("title");
-    }
-    return;
-  }
-
-  if (!element.getAttribute(ORIGINAL_ATTR)) {
-    element.setAttribute(ORIGINAL_ATTR, original);
-  }
-
-  if (element.textContent?.trim() !== view.display) {
-    element.textContent = view.display;
-  }
-
-  element.setAttribute(PATCHED_ATTR, "true");
-  element.setAttribute("title", view.title);
-  markParentedReferenceTree(element, view);
-}
-
-function compact(value: string): string {
-  return value.replace(/\s+/g, "");
-}
-
-function siblingText(node: Node, direction: "previous" | "next"): string {
-  let current =
-    direction === "previous" ? node.previousSibling : node.nextSibling;
-  let value = "";
-
-  while (current && value.length < 80) {
-    const text = current.textContent ?? "";
-    value =
-      direction === "previous" ? `${text}${value}` : `${value}${text}`;
-
-    if (direction === "previous") {
-      current = current.previousSibling;
-    } else {
-      current = current.nextSibling;
-    }
-  }
-
-  return value;
-}
-
-function isBracketedReferenceText(node: Text, value: string): boolean {
-  const before = compact(siblingText(node, "previous"));
-  const after = compact(siblingText(node, "next"));
-
-  if (before.endsWith("[[") && after.startsWith("]]")) return true;
-
-  let current = node.parentElement;
-  const needle = `[[${compact(value)}]]`;
-
-  for (let depth = 0; current && depth < 6; depth += 1) {
-    if (compact(current.textContent ?? "").includes(needle)) return true;
-    current = current.parentElement;
-  }
-
-  return false;
-}
-
-function shouldPatchTextNode(node: Text, value: string): boolean {
-  const parent = node.parentElement;
-  if (!parent) return false;
-  if (parent.closest("head,textarea,input,[contenteditable='true'],script,style")) return false;
-
-  return isBracketedReferenceText(node, value);
-}
-
-function viewForTitleInNode(node: Node, title: string): PageView | undefined {
-  const blockKey = closestBlockKey(node);
-  const titleCandidates = referenceNameCandidates(title);
-
-  if (blockKey) {
-    const blockViews = viewsByBlockTitle.get(blockKey);
-    if (blockViews) {
-      for (const candidate of titleCandidates) {
-        const view = blockViews.get(normalizeTitle(candidate));
-        if (view) return view;
-      }
-    }
-  }
-
-  for (const candidate of titleCandidates) {
-    const view = viewsByTitle.get(normalizeTitle(candidate));
-    if (view) return view;
-  }
-
-  return undefined;
-}
-
-function replaceBracketedReferences(value: string, node: Node): { text: string; views: PageView[] } {
-  const views: PageView[] = [];
-  const text = value.replace(/\[\[\s*([^\]]+?)\s*\]\]/g, (match, title: string) => {
-    const view = viewForTitleInNode(node, title);
-    if (!view) return match;
-
-    views.push(view);
-    return match.replace(title, view.display);
-  });
-
-  return { text, views };
-}
-
-function patchTextReference(node: Text): void {
-  if (!dataReady) return;
-
-  const original = originalTextNodes.get(node) ?? node.textContent ?? "";
-  if (!original) return;
-
-  const bracketed = replaceBracketedReferences(original, node);
-
-  if (bracketed.text !== original) {
-    if (!originalTextNodes.has(node)) {
-      originalTextNodes.set(node, original);
-    }
-
-    if (node.textContent !== bracketed.text) {
-      node.textContent = bracketed.text;
-    }
-
-    markParentedReferenceContainer(node, bracketed.views[0]);
-    return;
-  }
-
-  const trimmed = original.trim();
-  const view = viewForTitleInNode(node, trimmed);
-
-  if (!view) {
-    if (originalTextNodes.has(node)) {
-      node.textContent = originalTextNodes.get(node) ?? node.textContent;
-      originalTextNodes.delete(node);
-      node.parentElement?.removeAttribute(CONTAINS_PARENTED_ATTR);
-      node.parentElement?.classList.remove(CONTAINS_PARENTED_CLASS);
-    }
-    return;
-  }
-
-  if (!shouldPatchTextNode(node, trimmed)) return;
-
-  if (!originalTextNodes.has(node)) {
-    originalTextNodes.set(node, original);
-  }
-
-  if (node.textContent?.trim() !== view.display) {
-    node.textContent = original.replace(trimmed, view.display);
-  }
-
-  markParentedReferenceContainer(node, view);
-}
-
-function renderTextReferences(root: ParentNode): void {
-  const rootNode = root as Node;
-  const ownerDocument =
-    rootNode.nodeType === 9 ? (rootNode as Document) : rootNode.ownerDocument ?? document;
-  const tree = ownerDocument.createTreeWalker(rootNode, 4);
-  let node = tree.nextNode();
-
-  while (node) {
-    patchTextReference(node as Text);
-    node = tree.nextNode();
-  }
-}
-
-function renderReferences(root: ParentNode = hostDocument()): void {
-  const elements: Element[] = [];
-
-  if (root instanceof Element && root.matches(REF_SELECTOR)) {
-    elements.push(root);
-  }
-
-  elements.push(...Array.from(root.querySelectorAll(REF_SELECTOR)));
-
-  for (const element of elements) {
-    patchReference(element);
-  }
-
-  markDirectReferences(root);
-  renderTextReferences(root);
-}
-
-function scheduleRender(root?: ParentNode): void {
-  window.clearTimeout(renderTimer);
-  renderTimer = window.setTimeout(() => renderReferences(root ?? hostDocument()), 80);
-}
-
-function stopRenderPulse(): void {
-  window.clearInterval(renderPulseTimer);
-  window.clearTimeout(renderPulseStopTimer);
-  renderPulseTimer = undefined;
-  renderPulseStopTimer = undefined;
-}
-
-function startRenderPulse(duration = 8000): void {
-  stopRenderPulse();
-  renderReferences();
-  renderPulseTimer = window.setInterval(() => renderReferences(), 500);
-  renderPulseStopTimer = window.setTimeout(stopRenderPulse, duration);
-}
-
 function runRefresh(): void {
   window.clearTimeout(refreshTimer);
   void refreshReferenceViews()
-    .then(() => scheduleRender())
     .catch((error: unknown) => {
     console.error("[logseq-library-display] failed to refresh", error);
     });
@@ -1555,50 +1042,29 @@ function registerSettings(): void {
 async function boot(): Promise<void> {
   registerSettings();
 
-  const host = hostDocument();
-  observer = new MutationObserver((mutations) => {
-    for (const mutation of mutations) {
-      scheduleRender(mutation.target instanceof Element ? mutation.target : host);
-      return;
-    }
-  });
-
-  observer.observe(host.body ?? host.documentElement, {
-    attributes: true,
-    childList: true,
-    characterData: true,
-    subtree: true,
-  });
-
   offDbChanged = logseq.DB.onChanged(() => {
     dataReady = false;
     emptyRefreshRetries = 0;
-    originalTextNodes = new WeakMap<Text, string>();
     scheduleRefresh();
   });
 
   offRouteChanged = logseq.App.onRouteChanged(() => {
     dataReady = false;
     emptyRefreshRetries = 0;
-    originalTextNodes = new WeakMap<Text, string>();
     scheduleRefresh();
   });
 
   offSettingsChanged = logseq.onSettingsChanged(() => {
     dataReady = false;
     emptyRefreshRetries = 0;
-    originalTextNodes = new WeakMap<Text, string>();
     scheduleRefresh();
   });
 
   logseq.beforeunload(async () => {
-    observer?.disconnect();
     disposeHook(offDbChanged);
     disposeHook(offRouteChanged);
     disposeHook(offSettingsChanged);
     window.clearTimeout(refreshTimer);
-    window.clearTimeout(renderTimer);
-    stopRenderPulse();
     startupRefreshTimers.forEach((timer) => window.clearTimeout(timer));
   });
 
