@@ -38,6 +38,7 @@ type PageEntity = {
   "block/title"?: unknown;
   ":block/journal-day"?: unknown;
   "block/journal-day"?: unknown;
+  "journal-day"?: unknown;
   journalDay?: unknown;
   parent?: EntityRef;
   namespace?: EntityRef;
@@ -226,13 +227,43 @@ function dbId(entity: unknown): number | undefined {
   return entityId(record.id ?? record[":db/id"] ?? record["db/id"] ?? record.dbId);
 }
 
+function normalizeJournalDay(value: unknown): number | undefined {
+  if (typeof value === "number") return value;
+  if (typeof value === "string" && /^\d{8}$/.test(value.trim())) return Number(value.trim());
+  return undefined;
+}
+
+function journalDayFromTitle(value: unknown): number | undefined {
+  const title = textValue(value);
+  if (!title) return undefined;
+
+  const iso = title.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return Number(`${iso[1]}${iso[2]}${iso[3]}`);
+
+  const normalized = title.replace(/\b(\d{1,2})(st|nd|rd|th)\b/gi, "$1");
+  const parsed = new Date(normalized);
+  return Number.isNaN(parsed.getTime()) ? undefined : journalDayFromDate(parsed);
+}
+
 function journalDay(page: PageEntity | undefined): number | undefined {
   const value =
     page?.[":block/journal-day"] ??
     page?.["block/journal-day"] ??
+    page?.["journal-day"] ??
     page?.journalDay;
 
-  return typeof value === "number" ? value : undefined;
+  const day = normalizeJournalDay(value);
+  if (day) return day;
+
+  return [
+    page?.[":block/title"],
+    page?.["block/title"],
+    page?.title,
+    page?.originalName,
+    page?.name,
+    page?.[":block/name"],
+    page?.["block/name"],
+  ].map(journalDayFromTitle).find(Boolean);
 }
 
 function dateFromJournalDay(day: number): Date {
@@ -256,6 +287,13 @@ function addDays(date: Date, days: number): Date {
   const next = new Date(date);
   next.setDate(next.getDate() + days);
   return next;
+}
+
+function visibleJournalDay(): number | undefined {
+  const body = hostDocument().body;
+  const text = body?.innerText || body?.textContent || "";
+  const match = text.match(/\b\d{4}-\d{2}-\d{2}\b/);
+  return match ? journalDayFromTitle(match[0]) : undefined;
 }
 
 function entityUuidValue(entity: unknown): string | undefined {
@@ -612,7 +650,8 @@ async function currentPageBlocks(currentPage: PageEntity | undefined): Promise<P
 }
 
 async function recentJournalBlocks(currentPage: PageEntity | undefined): Promise<PageEntity[]> {
-  const currentJournalDay = journalDay(currentPage);
+  const currentJournalDay =
+    journalDay(currentPage) ?? visibleJournalDay() ?? journalDayFromDate(new Date());
   if (!currentJournalDay) return [];
 
   const currentDate = dateFromJournalDay(currentJournalDay);

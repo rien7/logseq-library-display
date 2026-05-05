@@ -6,6 +6,7 @@
   var CONTAINS_CLASS = "library-display-contains-parented-reference";
   var DISPLAY_CLASS = "library-display-rendered-reference";
   var ICON_CLASS = "library-display-rendered-reference-icon";
+  var TEXT_FALLBACK_ATTR = "data-library-display-original-text";
   var MARKED_SELECTOR =
     "[" + PARENTED_ATTR + "],[" + CONTAINS_ATTR + "]," +
     "." + PARENTED_CLASS + ",." + CONTAINS_CLASS + ",." + DISPLAY_CLASS;
@@ -21,6 +22,7 @@
     "data-library-display-title",
     "data-library-display-value",
     "data-library-display-original-html",
+    TEXT_FALLBACK_ATTR,
   ];
 
   if (window.__logseqLibraryDisplayHostMarker) {
@@ -54,6 +56,12 @@
   }
 
   function clearElement(element) {
+    var originalText = element.getAttribute(TEXT_FALLBACK_ATTR);
+    if (originalText !== null) {
+      element.replaceWith(document.createTextNode(originalText));
+      return;
+    }
+
     if (element.classList.contains(DISPLAY_CLASS)) {
       var originalHtml = element.getAttribute("data-library-display-original-html");
       if (originalHtml !== null) {
@@ -319,6 +327,136 @@
     return undefined;
   }
 
+  function textView(value) {
+    var title = String(value || "")
+      .replace(/^\s*\[\[\s*/, "")
+      .replace(/\s*\]\]\s*$/, "")
+      .trim();
+
+    return title ? state.byTitle[lower(title)] || state.byUuid[title] || state.byId[title] : undefined;
+  }
+
+  function textNodeAllowed(node) {
+    var parent = node.parentElement;
+    if (!parent) return false;
+
+    return !parent.closest(
+      "script,style,textarea,input,select,option,#" + PAYLOAD_ID + ",." + DISPLAY_CLASS,
+    );
+  }
+
+  function renderTextFallbackSpan(originalText, view) {
+    var span = document.createElement("span");
+    setAttribute(span, TEXT_FALLBACK_ATTR, originalText);
+    setAttribute(span, PARENTED_ATTR, "true");
+    setAttribute(span, "data-library-display-page-id", view.pageId);
+    setAttribute(span, "data-library-display-page-uuid", view.pageUuid);
+    setAttribute(span, "data-library-display-page-title", view.childTitle || view.title);
+    setAttribute(span, "data-library-display-parent-id", view.parentId);
+    setAttribute(span, "data-library-display-parent-uuid", view.parentUuid);
+    setAttribute(span, "data-library-display-parent-title", view.parentTitle);
+    setAttribute(span, "data-library-display-title", view.title);
+    setAttribute(span, "data-library-display-value", view.display);
+    span.classList.add(PARENTED_CLASS, DISPLAY_CLASS);
+
+    if (view.renderFontFamily === "tabler-icons") {
+      var icon = document.createElement("span");
+      icon.className = ICON_CLASS;
+      icon.textContent = view.renderText || "";
+      span.appendChild(document.createTextNode("[[ "));
+      span.appendChild(icon);
+      span.appendChild(document.createTextNode((view.renderSuffix || "") + " ]]"));
+    } else {
+      span.textContent = "[[ " + (view.renderText || view.display) + " ]]";
+    }
+
+    return span;
+  }
+
+  function markTextNode(node) {
+    if (!textNodeAllowed(node)) return false;
+
+    var text = node.nodeValue || "";
+    if (text.indexOf("[[") === -1) return false;
+
+    var pattern = /\[\[\s*([^\]]+?)\s*\]\]/g;
+    var lastIndex = 0;
+    var changed = false;
+    var fragment = document.createDocumentFragment();
+    var match;
+
+    while ((match = pattern.exec(text))) {
+      var view = textView(match[1]);
+      if (!view) continue;
+
+      if (match.index > lastIndex) {
+        fragment.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+      }
+
+      fragment.appendChild(renderTextFallbackSpan(match[0], view));
+      lastIndex = pattern.lastIndex;
+      changed = true;
+    }
+
+    if (!changed) return false;
+
+    if (lastIndex < text.length) {
+      fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
+    }
+
+    node.parentNode.replaceChild(fragment, node);
+    return true;
+  }
+
+  function textReferenceContainers() {
+    var containers = document.querySelectorAll(
+      ".block-content,.block-main-container,.ls-block,.references-blocks",
+    );
+    return containers.length ? containers : [document.body];
+  }
+
+  function hasUnmarkedTextReference() {
+    var containers = textReferenceContainers();
+
+    for (var i = 0; i < containers.length; i += 1) {
+      var walker = document.createTreeWalker(containers[i], NodeFilter.SHOW_TEXT);
+      var node;
+
+      while ((node = walker.nextNode())) {
+        if (!textNodeAllowed(node)) continue;
+
+        var text = node.nodeValue || "";
+        if (text.indexOf("[[") === -1) continue;
+
+        var pattern = /\[\[\s*([^\]]+?)\s*\]\]/g;
+        var match;
+        while ((match = pattern.exec(text))) {
+          if (textView(match[1])) return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  function markTextReferences() {
+    var containers = textReferenceContainers();
+
+    for (var i = 0; i < containers.length; i += 1) {
+      var walker = document.createTreeWalker(containers[i], NodeFilter.SHOW_TEXT);
+      var nodes = [];
+      var node;
+
+      while ((node = walker.nextNode())) {
+        nodes.push(node);
+      }
+
+      for (var j = 0; j < nodes.length; j += 1) {
+        markTextNode(nodes[j]);
+      }
+    }
+  }
+
   function elementSignature(element) {
     return attributeValues(element).join("|");
   }
@@ -352,10 +490,12 @@
 
       var elements = referenceElements();
       var signature = signatureForElements(elements);
+      var hasTextReference = hasUnmarkedTextReference();
       if (
         !state.needsClear &&
         signature === state.lastSignature &&
-        !hasUnmarkedReference(elements)
+        !hasUnmarkedReference(elements) &&
+        !hasTextReference
       ) {
         return;
       }
@@ -369,6 +509,7 @@
         var view = viewForElement(elements[i]);
         if (view) markReference(elements[i], view);
       }
+      markTextReferences();
       state.lastSignature = signature;
     } finally {
       window.setTimeout(function () {
