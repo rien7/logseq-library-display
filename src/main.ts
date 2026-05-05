@@ -117,8 +117,11 @@ let hostMarkerScriptLoad: Promise<void> | undefined;
 let lastHostMarkerSignature = "";
 const PAGE_SEPARATOR = " / ";
 const HOST_MARKER_KEY = "logseq-library-display-payload";
+const HOST_MARKER_SCRIPT_VERSION = 8;
 const HOST_MARKER_STYLE = `
 .library-display-rendered-reference-icon{font-family:tabler-icons!important;}
+.library-display-rendered-reference{color:inherit;text-decoration:inherit;}
+.library-display-rendered-reference[data-library-display-href]{cursor:pointer;}
 `;
 
 function hostDocument(): Document {
@@ -152,7 +155,7 @@ async function loadHostMarkerScript(): Promise<void> {
       const resolvedScriptUrl = logseq.resolveResourceFullUrl?.("dist/host-marker.js");
       const scriptUrl = resolvedScriptUrl
         ? `${resolvedScriptUrl}${resolvedScriptUrl.includes("?") ? "&" : "?"}v=${encodeURIComponent(
-            String(refreshVersion),
+            `${HOST_MARKER_SCRIPT_VERSION}-${refreshVersion}`,
           )}`
         : undefined;
 

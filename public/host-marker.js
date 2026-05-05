@@ -1,5 +1,6 @@
 (function () {
   var PAYLOAD_ID = "logseq-library-display-payload";
+  var MARKER_VERSION = 8;
   var PARENTED_ATTR = "data-library-display-parented";
   var CONTAINS_ATTR = "data-library-display-contains-parented-reference";
   var PARENTED_CLASS = "library-display-parented-reference";
@@ -7,6 +8,9 @@
   var DISPLAY_CLASS = "library-display-rendered-reference";
   var ICON_CLASS = "library-display-rendered-reference-icon";
   var TEXT_FALLBACK_ATTR = "data-library-display-original-text";
+  var HREF_ATTR = "data-library-display-href";
+  var REFERENCE_SHELL_SELECTOR = "a.page-ref,a[href*='#/page/'],.page-ref,[data-testid='page-ref']";
+  var REFERENCE_ANCHOR_SELECTOR = "a.page-ref,a[href*='#/page/']";
   var MARKED_SELECTOR =
     "[" + PARENTED_ATTR + "],[" + CONTAINS_ATTR + "]," +
     "." + PARENTED_CLASS + ",." + CONTAINS_CLASS + ",." + DISPLAY_CLASS;
@@ -23,11 +27,16 @@
     "data-library-display-value",
     "data-library-display-original-html",
     TEXT_FALLBACK_ATTR,
+    HREF_ATTR,
   ];
 
   if (window.__logseqLibraryDisplayHostMarker) {
-    window.__logseqLibraryDisplayHostMarker.refresh();
-    return;
+    if (window.__logseqLibraryDisplayHostMarker.version === MARKER_VERSION) {
+      window.__logseqLibraryDisplayHostMarker.refresh();
+      return;
+    }
+
+    window.__logseqLibraryDisplayHostMarker.disconnect();
   }
 
   var state = {
@@ -55,6 +64,12 @@
     }
   }
 
+  function htmlFragment(html) {
+    var template = document.createElement("template");
+    template.innerHTML = html;
+    return template.content;
+  }
+
   function clearElement(element) {
     var originalText = element.getAttribute(TEXT_FALLBACK_ATTR);
     if (originalText !== null) {
@@ -65,7 +80,11 @@
     if (element.classList.contains(DISPLAY_CLASS)) {
       var originalHtml = element.getAttribute("data-library-display-original-html");
       if (originalHtml !== null) {
-        element.innerHTML = originalHtml;
+        if (element.parentElement && element.parentElement.matches(".page-ref, a[href*='#/page/'], [data-testid='page-ref']")) {
+          element.replaceWith(htmlFragment(originalHtml));
+        } else {
+          element.innerHTML = originalHtml;
+        }
       }
     }
 
@@ -186,11 +205,23 @@
     });
   }
 
-  function renderTextReference(element, view) {
-    if (!element.classList.contains(DISPLAY_CLASS)) {
-      setAttribute(element, "data-library-display-original-html", element.innerHTML);
-    }
+  function pageHref(view) {
+    var name = view.pageUuid || view.childTitle || view.title;
+    return name ? "#/page/" + encodeURIComponent(name) : undefined;
+  }
 
+  function setReferenceMetadata(element, view) {
+    setAttribute(element, "data-library-display-page-id", view.pageId);
+    setAttribute(element, "data-library-display-page-uuid", view.pageUuid);
+    setAttribute(element, "data-library-display-page-title", view.childTitle || view.title);
+    setAttribute(element, "data-library-display-parent-id", view.parentId);
+    setAttribute(element, "data-library-display-parent-uuid", view.parentUuid);
+    setAttribute(element, "data-library-display-parent-title", view.parentTitle);
+    setAttribute(element, "data-library-display-title", view.title);
+    setAttribute(element, "data-library-display-value", view.display);
+  }
+
+  function appendReferenceContent(element, view) {
     element.textContent = "";
 
     if (view.renderFontFamily === "tabler-icons") {
@@ -202,8 +233,60 @@
     } else {
       element.textContent = view.renderText || view.display;
     }
+  }
 
-    element.classList.add(DISPLAY_CLASS);
+  function renderedChild(element) {
+    for (var i = 0; i < element.children.length; i += 1) {
+      if (element.children[i].classList.contains(DISPLAY_CLASS)) return element.children[i];
+    }
+    return undefined;
+  }
+
+  function shouldPreserveReferenceShell(element) {
+    return element.matches(REFERENCE_SHELL_SELECTOR);
+  }
+
+  function hasNativeAnchor(element) {
+    return element.matches(REFERENCE_ANCHOR_SELECTOR) || Boolean(element.querySelector(REFERENCE_ANCHOR_SELECTOR));
+  }
+
+  function displayTargetForShell(element) {
+    var child = renderedChild(element);
+    if (child) return child;
+
+    child = document.createElement("span");
+    setAttribute(child, "data-library-display-original-html", element.innerHTML);
+    element.textContent = "";
+    element.appendChild(child);
+    return child;
+  }
+
+  function renderTextReference(element, view) {
+    var target = element;
+    if (shouldPreserveReferenceShell(element)) {
+      target = displayTargetForShell(element);
+      setAttribute(target, HREF_ATTR, hasNativeAnchor(element) ? undefined : pageHref(view));
+    } else if (!element.classList.contains(DISPLAY_CLASS)) {
+      setAttribute(element, "data-library-display-original-html", element.innerHTML);
+    }
+
+    appendReferenceContent(target, view);
+    setReferenceMetadata(target, view);
+    target.classList.add(DISPLAY_CLASS);
+  }
+
+  function nativeReferenceTarget(element, pageReference, pageRef) {
+    var anchor = element.matches(REFERENCE_ANCHOR_SELECTOR)
+      ? element
+      : element.closest(REFERENCE_ANCHOR_SELECTOR);
+    if (anchor) return anchor;
+
+    if (pageReference) {
+      anchor = pageReference.querySelector(REFERENCE_ANCHOR_SELECTOR);
+      if (anchor) return anchor;
+    }
+
+    return pageRef || element;
   }
 
   function markReference(element, view) {
@@ -221,19 +304,13 @@
 
     for (var i = 0; i < targets.length; i += 1) {
       var target = targets[i];
+      if (shouldPreserveReferenceShell(target)) continue;
       setAttribute(target, PARENTED_ATTR, "true");
-      setAttribute(target, "data-library-display-page-id", view.pageId);
-      setAttribute(target, "data-library-display-page-uuid", view.pageUuid);
-      setAttribute(target, "data-library-display-page-title", view.childTitle || view.title);
-      setAttribute(target, "data-library-display-parent-id", view.parentId);
-      setAttribute(target, "data-library-display-parent-uuid", view.parentUuid);
-      setAttribute(target, "data-library-display-parent-title", view.parentTitle);
-      setAttribute(target, "data-library-display-title", view.title);
-      setAttribute(target, "data-library-display-value", view.display);
+      setReferenceMetadata(target, view);
       target.classList.add(PARENTED_CLASS);
     }
 
-    var renderTarget = pageRef || element;
+    var renderTarget = nativeReferenceTarget(element, pageReference, pageRef);
     renderTextReference(renderTarget, view);
 
     var container = element.closest(
@@ -327,6 +404,71 @@
     return undefined;
   }
 
+  function eventElement(event) {
+    var target = event.target;
+    if (!target) return undefined;
+
+    var element = target.nodeType === 3 ? target.parentElement : target;
+    if (!element || !element.closest) return undefined;
+
+    return element;
+  }
+
+  function navigationTarget(event) {
+    var element = eventElement(event);
+    if (!element) return undefined;
+
+    var selector = "." + DISPLAY_CLASS + "[" + HREF_ATTR + "]";
+    return element.closest(selector) || (element.querySelector && element.querySelector(selector));
+  }
+
+  function navigateTarget(target) {
+    var href = target.getAttribute(HREF_ATTR);
+    if (!href || href.indexOf("#/page/") !== 0) return;
+
+    window.location.hash = href.slice(1);
+  }
+
+  function onNavigationPointerDown(event) {
+    if (event.button !== undefined && event.button !== 0) return;
+
+    var target = navigationTarget(event);
+    if (!target) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    navigateTarget(target);
+  }
+
+  function stopNavigationEdit(event) {
+    if (!navigationTarget(event)) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function onNavigationClick(event) {
+    if (event.button !== undefined && event.button !== 0) return;
+
+    var target = navigationTarget(event);
+    if (!target) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    navigateTarget(target);
+  }
+
+  function onNavigationKeydown(event) {
+    if (event.key !== "Enter" && event.key !== " ") return;
+
+    var target = navigationTarget(event);
+    if (!target) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    navigateTarget(target);
+  }
+
   function textView(value) {
     var title = String(value || "")
       .replace(/^\s*\[\[\s*/, "")
@@ -348,15 +490,9 @@
   function renderTextFallbackSpan(originalText, view) {
     var span = document.createElement("span");
     setAttribute(span, TEXT_FALLBACK_ATTR, originalText);
+    setAttribute(span, HREF_ATTR, pageHref(view));
     setAttribute(span, PARENTED_ATTR, "true");
-    setAttribute(span, "data-library-display-page-id", view.pageId);
-    setAttribute(span, "data-library-display-page-uuid", view.pageUuid);
-    setAttribute(span, "data-library-display-page-title", view.childTitle || view.title);
-    setAttribute(span, "data-library-display-parent-id", view.parentId);
-    setAttribute(span, "data-library-display-parent-uuid", view.parentUuid);
-    setAttribute(span, "data-library-display-parent-title", view.parentTitle);
-    setAttribute(span, "data-library-display-title", view.title);
-    setAttribute(span, "data-library-display-value", view.display);
+    setReferenceMetadata(span, view);
     span.classList.add(PARENTED_CLASS, DISPLAY_CLASS);
 
     if (view.renderFontFamily === "tabler-icons") {
@@ -471,6 +607,7 @@
 
   function hasUnmarkedReference(elements) {
     for (var i = 0; i < elements.length; i += 1) {
+      if (shouldPreserveReferenceShell(elements[i]) && renderedChild(elements[i])) continue;
       if (!elements[i].hasAttribute(PARENTED_ATTR) && viewForElement(elements[i])) return true;
     }
     return false;
@@ -576,12 +713,21 @@
     characterData: true,
     subtree: true,
   });
+  document.addEventListener("pointerdown", onNavigationPointerDown, true);
+  document.addEventListener("mousedown", stopNavigationEdit, true);
+  document.addEventListener("click", onNavigationClick, true);
+  document.addEventListener("keydown", onNavigationKeydown, true);
 
   window.__logseqLibraryDisplayHostMarker = {
+    version: MARKER_VERSION,
     refresh: readPayload,
     mark: mark,
     disconnect: function () {
       observer.disconnect();
+      document.removeEventListener("pointerdown", onNavigationPointerDown, true);
+      document.removeEventListener("mousedown", stopNavigationEdit, true);
+      document.removeEventListener("click", onNavigationClick, true);
+      document.removeEventListener("keydown", onNavigationKeydown, true);
       window.clearTimeout(state.timer);
       window.clearInterval(state.pulseTimer);
       window.clearTimeout(state.pulseStopTimer);
