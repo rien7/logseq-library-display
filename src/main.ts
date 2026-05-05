@@ -36,6 +36,9 @@ type PageEntity = {
   title?: unknown;
   ":block/title"?: unknown;
   "block/title"?: unknown;
+  ":block/journal-day"?: unknown;
+  "block/journal-day"?: unknown;
+  journalDay?: unknown;
   parent?: EntityRef;
   namespace?: EntityRef;
   refs?: EntityRef[];
@@ -75,6 +78,16 @@ const CURRENT_PAGE_BLOCKS_QUERY = `
 [:find (pull ?b [* {:block/refs [* {:block/parent [*]}]}])
  :in $ ?page
  :where [?b :block/page ?page]]
+`;
+const RECENT_JOURNAL_BLOCKS_QUERY = `
+[:find (pull ?b [* {:block/refs [* {:block/parent [*]}]}])
+ :in $ ?min-day ?max-day
+ :where
+ [?page :block/journal-day ?day]
+ [(>= ?day ?min-day)]
+ [(<= ?day ?max-day)]
+ [?b :block/page ?page]
+ [?b :block/refs ?ref]]
 `;
 const BLOCK_BY_ID_QUERY = `
 [:find (pull ?b [* {:block/refs [* {:block/parent [*]}]}]) .
@@ -211,6 +224,38 @@ function dbId(entity: unknown): number | undefined {
   if (!entity || typeof entity !== "object") return undefined;
   const record = entity as Record<string, unknown>;
   return entityId(record.id ?? record[":db/id"] ?? record["db/id"] ?? record.dbId);
+}
+
+function journalDay(page: PageEntity | undefined): number | undefined {
+  const value =
+    page?.[":block/journal-day"] ??
+    page?.["block/journal-day"] ??
+    page?.journalDay;
+
+  return typeof value === "number" ? value : undefined;
+}
+
+function dateFromJournalDay(day: number): Date {
+  const value = String(day).padStart(8, "0");
+  const year = Number(value.slice(0, 4));
+  const month = Number(value.slice(4, 6));
+  const date = Number(value.slice(6, 8));
+
+  return new Date(year, month - 1, date);
+}
+
+function journalDayFromDate(date: Date): number {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+
+  return Number(`${year}${month}${day}`);
+}
+
+function addDays(date: Date, days: number): Date {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
 }
 
 function entityUuidValue(entity: unknown): string | undefined {
@@ -566,6 +611,24 @@ async function currentPageBlocks(currentPage: PageEntity | undefined): Promise<P
   return currentPage ? [currentPage, ...flattenBlocks(blocks)] : flattenBlocks(blocks);
 }
 
+async function recentJournalBlocks(currentPage: PageEntity | undefined): Promise<PageEntity[]> {
+  const currentJournalDay = journalDay(currentPage);
+  if (!currentJournalDay) return [];
+
+  const currentDate = dateFromJournalDay(currentJournalDay);
+  const minDay = journalDayFromDate(addDays(currentDate, -14));
+  const maxDay = journalDayFromDate(addDays(currentDate, 3));
+
+  try {
+    return queryEntities(
+      await logseq.DB.datascriptQuery(RECENT_JOURNAL_BLOCKS_QUERY, minDay, maxDay),
+    );
+  } catch (error) {
+    console.warn("[logseq-library-display] failed to query recent journal blocks", error);
+    return [];
+  }
+}
+
 async function visibleBlocks(): Promise<PageEntity[]> {
   const uuids = visibleBlockUuids();
   if (uuids.length === 0) return [];
@@ -621,6 +684,7 @@ async function refreshReferenceViews(): Promise<void> {
   const nextHostMarkerViews = new Map<string, PageView>();
   const entityCache = new Map<string, Promise<PageEntity | undefined>>();
   const blocks = await currentPageBlocks(currentPage);
+  blocks.push(...await recentJournalBlocks(currentPage));
   blocks.push(...await visibleBlocks());
 
   await addViewsFromBlocks(uniqueEntities(blocks), nextHostMarkerViews, entityCache);

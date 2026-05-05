@@ -240,17 +240,33 @@
   }
 
   function referenceElements() {
-    var nativeReferences = document.querySelectorAll(
-      ".page-reference[data-ref],a.page-ref[data-ref],span.page-ref[data-ref]," +
-        ".page-ref[data-ref],[data-testid='page-ref'][data-ref]",
+    return document.querySelectorAll(
+      ".page-reference,a.page-ref,span.page-ref,.page-ref,[data-testid='page-ref']," +
+        "[data-ref-name],[data-page-id],[data-entity-id]",
     );
-    if (nativeReferences.length > 0) return nativeReferences;
+  }
 
-    return document.querySelectorAll("[data-ref-name],[data-page-id],[data-entity-id]");
+  function hrefValues(element) {
+    var href = element.getAttribute("href");
+    if (!href) return [];
+
+    var values = [href];
+    try {
+      values.push(decodeURIComponent(href));
+    } catch (_) {
+      // Keep the raw href when it is not URI-encoded.
+    }
+
+    var uuidMatches = href.match(/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g);
+    if (uuidMatches) {
+      values = values.concat(uuidMatches);
+    }
+
+    return values;
   }
 
   function attributeValues(element) {
-    return [
+    var values = [
       element.getAttribute("data-ref"),
       element.getAttribute("data-page-uuid"),
       element.getAttribute("data-block-uuid"),
@@ -259,7 +275,13 @@
       element.getAttribute("data-ref-name"),
       element.getAttribute("data-page"),
       element.getAttribute("data-page-name"),
-    ].filter(function (value) {
+    ].concat(hrefValues(element));
+
+    if (!element.classList.contains(DISPLAY_CLASS)) {
+      values.push(element.textContent);
+    }
+
+    return values.filter(function (value) {
       return value && String(value).trim();
     });
   }
