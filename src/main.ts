@@ -55,9 +55,9 @@ type PageView = {
   pageUuid?: string;
   parentId?: number;
   parentUuid?: string;
-  cssBefore?: string;
-  cssAfter?: string;
-  cssBeforeFontFamily?: string;
+  renderText: string;
+  renderSuffix?: string;
+  renderFontFamily?: string;
 };
 
 type HostMarkerPayload = {
@@ -104,11 +104,7 @@ let lastHostMarkerSignature = "";
 const PAGE_SEPARATOR = " / ";
 const HOST_MARKER_KEY = "logseq-library-display-payload";
 const HOST_MARKER_STYLE = `
-.library-display-rendered-reference{font-size:0!important;}
-.library-display-rendered-reference>*{font-size:0!important;}
-.library-display-rendered-reference::before{content:attr(data-library-display-before);font-size:var(--ls-page-text-size,1rem)!important;}
-.library-display-rendered-reference.library-display-rendered-reference-tabler::before{font-family:tabler-icons!important;}
-.library-display-rendered-reference::after{content:attr(data-library-display-after);font-size:var(--ls-page-text-size,1rem)!important;}
+.library-display-rendered-reference-icon{font-family:tabler-icons!important;}
 `;
 
 function hostDocument(): Document {
@@ -451,9 +447,9 @@ function pageView(page: PageEntity, parent: PageEntity): PageView {
         display: text,
         title: text,
         ...metadata,
-        cssBefore: icon.value,
-        cssAfter: `${PAGE_SEPARATOR}${childTitle}`,
-        cssBeforeFontFamily: "tabler-icons",
+        renderText: icon.value,
+        renderSuffix: `${PAGE_SEPARATOR}${childTitle}`,
+        renderFontFamily: "tabler-icons",
       };
     }
 
@@ -461,7 +457,7 @@ function pageView(page: PageEntity, parent: PageEntity): PageView {
       display: `${icon.value}${PAGE_SEPARATOR}${childTitle}`,
       title: text,
       ...metadata,
-      cssBefore: `${icon.value}${PAGE_SEPARATOR}${childTitle}`,
+      renderText: `${icon.value}${PAGE_SEPARATOR}${childTitle}`,
     };
   }
 
@@ -471,9 +467,9 @@ function pageView(page: PageEntity, parent: PageEntity): PageView {
         display: text,
         title: text,
         ...metadata,
-        cssBefore: icon.value,
-        cssAfter: ` ${text}`,
-        cssBeforeFontFamily: "tabler-icons",
+        renderText: icon.value,
+        renderSuffix: ` ${text}`,
+        renderFontFamily: "tabler-icons",
       };
     }
 
@@ -481,11 +477,11 @@ function pageView(page: PageEntity, parent: PageEntity): PageView {
       display: `${icon.value} ${text}`,
       title: text,
       ...metadata,
-      cssBefore: `${icon.value} ${text}`,
+      renderText: `${icon.value} ${text}`,
     };
   }
 
-  return { display: text, title: text, ...metadata, cssBefore: text };
+  return { display: text, title: text, ...metadata, renderText: text };
 }
 
 function visibleBlockUuids(): string[] {
@@ -624,7 +620,7 @@ async function refreshReferenceViews(): Promise<void> {
 
   const nextHostMarkerViews = new Map<string, PageView>();
   const entityCache = new Map<string, Promise<PageEntity | undefined>>();
-  const blocks = currentPage ? await currentPageBlocks(currentPage) : [];
+  const blocks = await currentPageBlocks(currentPage);
   blocks.push(...await visibleBlocks());
 
   await addViewsFromBlocks(uniqueEntities(blocks), nextHostMarkerViews, entityCache);

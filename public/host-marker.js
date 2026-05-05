@@ -5,7 +5,7 @@
   var PARENTED_CLASS = "library-display-parented-reference";
   var CONTAINS_CLASS = "library-display-contains-parented-reference";
   var DISPLAY_CLASS = "library-display-rendered-reference";
-  var TABLER_CLASS = "library-display-rendered-reference-tabler";
+  var ICON_CLASS = "library-display-rendered-reference-icon";
   var MARKED_SELECTOR =
     "[" + PARENTED_ATTR + "],[" + CONTAINS_ATTR + "]," +
     "." + PARENTED_CLASS + ",." + CONTAINS_CLASS + ",." + DISPLAY_CLASS;
@@ -20,8 +20,7 @@
     "data-library-display-parent-title",
     "data-library-display-title",
     "data-library-display-value",
-    "data-library-display-before",
-    "data-library-display-after",
+    "data-library-display-original-html",
   ];
 
   if (window.__logseqLibraryDisplayHostMarker) {
@@ -55,10 +54,17 @@
   }
 
   function clearElement(element) {
+    if (element.classList.contains(DISPLAY_CLASS)) {
+      var originalHtml = element.getAttribute("data-library-display-original-html");
+      if (originalHtml !== null) {
+        element.innerHTML = originalHtml;
+      }
+    }
+
     for (var i = 0; i < METADATA_ATTRS.length; i += 1) {
       element.removeAttribute(METADATA_ATTRS[i]);
     }
-    element.classList.remove(PARENTED_CLASS, CONTAINS_CLASS, DISPLAY_CLASS, TABLER_CLASS);
+    element.classList.remove(PARENTED_CLASS, CONTAINS_CLASS, DISPLAY_CLASS);
   }
 
   function clearMarkedElements() {
@@ -172,6 +178,26 @@
     });
   }
 
+  function renderTextReference(element, view) {
+    if (!element.classList.contains(DISPLAY_CLASS)) {
+      setAttribute(element, "data-library-display-original-html", element.innerHTML);
+    }
+
+    element.textContent = "";
+
+    if (view.renderFontFamily === "tabler-icons") {
+      var icon = document.createElement("span");
+      icon.className = ICON_CLASS;
+      icon.textContent = view.renderText || "";
+      element.appendChild(icon);
+      element.appendChild(document.createTextNode(view.renderSuffix || ""));
+    } else {
+      element.textContent = view.renderText || view.display;
+    }
+
+    element.classList.add(DISPLAY_CLASS);
+  }
+
   function markReference(element, view) {
     var targets = [element];
     var pageReference = element.matches(".page-reference")
@@ -200,14 +226,7 @@
     }
 
     var renderTarget = pageRef || element;
-    setAttribute(renderTarget, "data-library-display-before", view.cssBefore || view.display);
-    setAttribute(renderTarget, "data-library-display-after", view.cssAfter);
-    renderTarget.classList.add(DISPLAY_CLASS);
-    if (view.cssBeforeFontFamily === "tabler-icons") {
-      renderTarget.classList.add(TABLER_CLASS);
-    } else {
-      renderTarget.classList.remove(TABLER_CLASS);
-    }
+    renderTextReference(renderTarget, view);
 
     var container = element.closest(
       ".block-content, .block-main-container, .ls-block, .page-reference, p, div",
