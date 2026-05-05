@@ -4,9 +4,11 @@
   var CONTAINS_ATTR = "data-library-display-contains-parented-reference";
   var PARENTED_CLASS = "library-display-parented-reference";
   var CONTAINS_CLASS = "library-display-contains-parented-reference";
+  var DISPLAY_CLASS = "library-display-rendered-reference";
+  var TABLER_CLASS = "library-display-rendered-reference-tabler";
   var MARKED_SELECTOR =
     "[" + PARENTED_ATTR + "],[" + CONTAINS_ATTR + "]," +
-    "." + PARENTED_CLASS + ",." + CONTAINS_CLASS;
+    "." + PARENTED_CLASS + ",." + CONTAINS_CLASS + ",." + DISPLAY_CLASS;
   var METADATA_ATTRS = [
     PARENTED_ATTR,
     CONTAINS_ATTR,
@@ -18,6 +20,8 @@
     "data-library-display-parent-title",
     "data-library-display-title",
     "data-library-display-value",
+    "data-library-display-before",
+    "data-library-display-after",
   ];
 
   if (window.__logseqLibraryDisplayHostMarker) {
@@ -54,7 +58,7 @@
     for (var i = 0; i < METADATA_ATTRS.length; i += 1) {
       element.removeAttribute(METADATA_ATTRS[i]);
     }
-    element.classList.remove(PARENTED_CLASS, CONTAINS_CLASS);
+    element.classList.remove(PARENTED_CLASS, CONTAINS_CLASS, DISPLAY_CLASS, TABLER_CLASS);
   }
 
   function clearMarkedElements() {
@@ -97,7 +101,9 @@
       state.needsClear = true;
       state.lastSignature = "";
       scheduleMark();
-      startPulse();
+      if (state.views.length > 0) {
+        startPulse();
+      }
     } catch (error) {
       console.warn("[logseq-library-display] failed to read host marker payload", error);
     }
@@ -173,7 +179,8 @@
       : element.closest(".page-reference[data-ref], .page-reference");
     var pageRef = element.matches(".page-ref")
       ? element
-      : element.closest("a.page-ref, span.page-ref, .page-ref");
+      : element.closest("a.page-ref, span.page-ref, .page-ref") ||
+        (pageReference && pageReference.querySelector("a.page-ref, span.page-ref, .page-ref"));
 
     if (pageReference) targets.push(pageReference);
     if (pageRef) targets.push(pageRef);
@@ -190,6 +197,16 @@
       setAttribute(target, "data-library-display-title", view.title);
       setAttribute(target, "data-library-display-value", view.display);
       target.classList.add(PARENTED_CLASS);
+    }
+
+    var renderTarget = pageRef || element;
+    setAttribute(renderTarget, "data-library-display-before", view.cssBefore || view.display);
+    setAttribute(renderTarget, "data-library-display-after", view.cssAfter);
+    renderTarget.classList.add(DISPLAY_CLASS);
+    if (view.cssBeforeFontFamily === "tabler-icons") {
+      renderTarget.classList.add(TABLER_CLASS);
+    } else {
+      renderTarget.classList.remove(TABLER_CLASS);
     }
 
     var container = element.closest(
@@ -283,6 +300,15 @@
   function mark() {
     state.marking = true;
     try {
+      if (state.views.length === 0) {
+        if (state.needsClear) {
+          clearMarkedElements();
+          state.needsClear = false;
+          state.lastSignature = "";
+        }
+        return;
+      }
+
       var elements = referenceElements();
       var signature = signatureForElements(elements);
       if (
@@ -311,6 +337,8 @@
   }
 
   function scheduleMark() {
+    if (state.views.length === 0 && !state.needsClear) return;
+
     window.clearTimeout(state.timer);
     state.timer = window.setTimeout(mark, 80);
   }
@@ -343,7 +371,9 @@
             return;
           }
         }
-        scheduleMark();
+        if (state.views.length > 0) {
+          scheduleMark();
+        }
         return;
       }
 

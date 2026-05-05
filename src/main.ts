@@ -89,30 +89,27 @@ const ENTITY_BY_UUID_QUERY = `
  :in $ ?uuid
  :where [?e :block/uuid ?uuid]]
 `;
-const ENTITIES_WITH_PARENT_QUERY = `
-[:find (pull ?e [* {:block/parent [*]}])
- :where
- [?e :block/title ?title]
- [?e :block/parent ?parent]
- [?parent :block/title ?parent-title]]
-`;
 
-let viewsById = new Map<number, PageView>();
-let viewsByUuid = new Map<string, PageView>();
-let viewsByTitle = new Map<string, PageView>();
-let styleRulesByKey = new Map<string, string>();
-let hostMarkerViews: PageView[] = [];
-let dataReady = false;
 let refreshVersion = 0;
 let refreshTimer: number | undefined;
+let refreshRunning = false;
+let refreshQueued = false;
 let offDbChanged: OffHook;
 let offRouteChanged: OffHook;
 let offSettingsChanged: OffHook;
 let emptyRefreshRetries = 0;
 let startupRefreshTimers: number[] = [];
 let hostMarkerScriptLoad: Promise<void> | undefined;
+let lastHostMarkerSignature = "";
 const PAGE_SEPARATOR = " / ";
 const HOST_MARKER_KEY = "logseq-library-display-payload";
+const HOST_MARKER_STYLE = `
+.library-display-rendered-reference{font-size:0!important;}
+.library-display-rendered-reference>*{font-size:0!important;}
+.library-display-rendered-reference::before{content:attr(data-library-display-before);font-size:var(--ls-page-text-size,1rem)!important;}
+.library-display-rendered-reference.library-display-rendered-reference-tabler::before{font-family:tabler-icons!important;}
+.library-display-rendered-reference::after{content:attr(data-library-display-after);font-size:var(--ls-page-text-size,1rem)!important;}
+`;
 
 function hostDocument(): Document {
   try {
@@ -125,22 +122,6 @@ function hostDocument(): Document {
 
 function encodePayload(payload: HostMarkerPayload): string {
   return window.btoa(encodeURIComponent(JSON.stringify(payload)));
-}
-
-function uniqueHostMarkerViews(): PageView[] {
-  const views: PageView[] = [];
-  const seen = new Set<string>();
-
-  for (const view of hostMarkerViews) {
-    const key =
-      view.pageUuid ??
-      (typeof view.pageId === "number" ? `id:${view.pageId}` : view.title);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    views.push(view);
-  }
-
-  return views;
 }
 
 function addHostMarkerView(views: Map<string, PageView>, view: PageView): void {
@@ -179,10 +160,14 @@ async function loadHostMarkerScript(): Promise<void> {
   await hostMarkerScriptLoad;
 }
 
-function publishHostMarkerPayload(): void {
+function publishHostMarkerPayload(views: PageView[]): void {
+  const signature = JSON.stringify(views);
+  if (signature === lastHostMarkerSignature) return;
+
+  lastHostMarkerSignature = signature;
   const payload = encodePayload({
     version: refreshVersion,
-    views: uniqueHostMarkerViews(),
+    views,
   });
 
   void loadHostMarkerScript().then(() => {
@@ -199,10 +184,6 @@ function settings(): Required<PluginSettings> {
   return {
     displayMode: value.displayMode ?? "Text",
   };
-}
-
-function normalizeTitle(value: string): string {
-  return value.trim().replace(/^#+/, "").toLocaleLowerCase();
 }
 
 function lastPathSegment(value: string): string {
@@ -254,17 +235,6 @@ function pageTitle(page: PageEntity): string {
         page["block/name"],
     ) ?? "",
   );
-}
-
-function pageTitleCandidates(page: PageEntity): string[] {
-  return [
-    textValue(page[":block/title"] ?? page["block/title"] ?? page.title),
-    page.originalName,
-    page.name,
-    textValue(page[":block/name"] ?? page["block/name"]),
-    pageTitle(page),
-  ]
-    .filter((value): value is string => Boolean(value?.trim()));
 }
 
 function normalizeIconType(value: string | undefined): string | undefined {
@@ -518,93 +488,6 @@ function pageView(page: PageEntity, parent: PageEntity): PageView {
   return { display: text, title: text, ...metadata, cssBefore: text };
 }
 
-function pagePrefix(page: PageEntity, parent: PageEntity): string {
-  const parentTitle = pageTitle(parent);
-  const childTitle = pageTitle(page);
-  const view = pageView(page, parent);
-
-  if (!childTitle || !view.display.endsWith(childTitle)) {
-    return `${parentTitle}${PAGE_SEPARATOR}`;
-  }
-
-  return view.display.slice(0, -childTitle.length);
-}
-
-function bracketedPageView(page: PageEntity, parent: PageEntity): string {
-  return `[[${pageView(page, parent).display}]]`;
-}
-
-function cssString(value: string): string {
-  return JSON.stringify(value).replace(/</g, "\\003c ");
-}
-
-function cssAttrValue(value: string | number): string {
-  return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-}
-
-function linkReferenceSelectors(entity: PageEntity, includeTitles = true): string[] {
-  const id = dbId(entity);
-  const uuid = entityUuidValue(entity);
-  const selectors = new Set<string>();
-
-  if (uuid) {
-    selectors.add(`a[href*="${cssAttrValue(uuid)}"]`);
-  }
-
-  if (typeof id === "number") {
-    selectors.add(`a[href*="${id}"]`);
-  }
-
-  if (includeTitles) {
-    for (const title of pageTitleCandidates(entity)) {
-      for (const value of encodedTitleValues(title.trim())) {
-        selectors.add(`a[href*="${cssAttrValue(value)}"]`);
-      }
-    }
-  }
-
-  return Array.from(selectors);
-}
-
-function wrapperReferenceSelectors(entity: PageEntity): string[] {
-  const selectors = new Set<string>();
-
-  for (const link of linkReferenceSelectors(entity)) {
-    selectors.add(`${link}:has(.page-ref)`);
-    selectors.add(`${link}:has(.page-reference)`);
-    selectors.add(`${link}:has([data-ref])`);
-    selectors.add(`${link}:has([data-ref-name])`);
-    selectors.add(`${link}:has([data-page])`);
-    selectors.add(`${link}:has([data-page-name])`);
-    selectors.add(`${link}:has(.codemirror-ref)`);
-  }
-
-  return Array.from(selectors);
-}
-
-function blockScopeSelectors(block: PageEntity): string[] {
-  const id = dbId(block);
-  const uuid = entityUuidValue(block);
-  const selectors: string[] = [];
-
-  if (uuid) {
-    const value = cssAttrValue(uuid);
-    selectors.push(
-      `[blockid="${value}"]`,
-      `[data-blockid="${value}"]`,
-      `[data-block-id="${value}"]`,
-      `[data-block-uuid="${value}"]`,
-      `[data-uuid="${value}"]`,
-    );
-  }
-
-  if (typeof id === "number") {
-    selectors.push(`[data-block-id="${id}"]`, `[data-entity-id="${id}"]`);
-  }
-
-  return selectors;
-}
-
 function visibleBlockUuids(): string[] {
   const document = hostDocument();
   const uuids = new Set<string>();
@@ -615,224 +498,6 @@ function visibleBlockUuids(): string[] {
   }
 
   return Array.from(uuids);
-}
-
-function encodedTitleValues(title: string): string[] {
-  const values = new Set<string>([title]);
-
-  try {
-    values.add(encodeURIComponent(title));
-  } catch {
-    // Keep the raw title selector if encoding fails for an unexpected value.
-  }
-
-  return Array.from(values).filter(Boolean);
-}
-
-function titleReferenceSelectors(entity: PageEntity): string[] {
-  const selectors = new Set<string>();
-
-  for (const title of pageTitleCandidates(entity)) {
-    const cleanTitle = title.trim();
-    if (!cleanTitle) continue;
-
-    const attr = cssAttrValue(cleanTitle);
-    selectors.add(`.page-ref[data-ref="${attr}"]`);
-    selectors.add(`.page-ref[data-ref-name="${attr}"]`);
-    selectors.add(`.page-ref[data-page="${attr}"]`);
-    selectors.add(`.page-ref[data-page-name="${attr}"]`);
-    selectors.add(`.page-reference[data-ref="${attr}"]`);
-    selectors.add(`.page-reference[data-ref-name="${attr}"]`);
-    selectors.add(`.page-reference[data-page="${attr}"]`);
-    selectors.add(`.page-reference[data-page-name="${attr}"]`);
-    selectors.add(`[data-ref="${attr}"] .page-ref`);
-    selectors.add(`[data-ref-name="${attr}"] .page-ref`);
-    selectors.add(`[data-page="${attr}"] .page-ref`);
-    selectors.add(`[data-page-name="${attr}"] .page-ref`);
-
-    for (const value of encodedTitleValues(cleanTitle)) {
-      selectors.add(`a[href*="${cssAttrValue(value)}"] .page-ref`);
-      selectors.add(`a[href*="${cssAttrValue(value)}"] .page-reference`);
-    }
-  }
-
-  return Array.from(selectors);
-}
-
-function fullReferenceSelectors(entity: PageEntity): string[] {
-  const id = dbId(entity);
-  const uuid = entityUuidValue(entity);
-  const selectors = new Set<string>(linkReferenceSelectors(entity, false));
-
-  if (uuid) {
-    const value = cssAttrValue(uuid);
-    selectors.add(`[data-ref*="${value}"]`);
-    selectors.add(`[data-page*="${value}"]`);
-    selectors.add(`[data-page-id="${value}"]`);
-    selectors.add(`[data-entity-id="${value}"]`);
-  }
-
-  if (typeof id === "number") {
-    selectors.add(`[data-page-id="${id}"]`);
-    selectors.add(`[data-entity-id="${id}"]`);
-  }
-
-  return Array.from(selectors);
-}
-
-function replacementDeclarations(selectors: string[], display: string): string[] {
-  if (selectors.length === 0) return [];
-
-  return [
-    `${selectors.join(",")}{font-size:0!important;}`,
-    `${selectors.map((selector) => `${selector} *`).join(",")}{font-size:0!important;}`,
-    `${selectors
-      .map((selector) => `${selector}::before`)
-      .join(",")}{content:${cssString(display)};font-size:var(--ls-page-text-size,1rem)!important;}`,
-  ];
-}
-
-function pageReferenceTextSelector(entity: PageEntity): string | undefined {
-  const uuid = entityUuidValue(entity);
-  if (!uuid) return undefined;
-
-  return `.page-reference[data-ref="${cssAttrValue(uuid)}"] a.page-ref > span`;
-}
-
-function addPageReferenceTextRule(
-  entity: PageEntity,
-  parent: PageEntity,
-  rules: Map<string, string>,
-): void {
-  const selector = pageReferenceTextSelector(entity);
-  const key = entityUuidValue(entity) ?? String(dbId(entity) ?? "");
-  if (!selector || !key) return;
-
-  const view = pageView(entity, parent);
-  const before = view.cssBefore ?? view.display;
-  const beforeFontFamily = view.cssBeforeFontFamily
-    ? `font-family:${view.cssBeforeFontFamily}!important;`
-    : "";
-  const afterRule = view.cssAfter
-    ? `${selector}::after{content:${cssString(view.cssAfter)};font-size:1rem!important;}`
-    : "";
-
-  rules.set(
-    `entity:${key}`,
-    `${selector}{font-size:0!important;}` +
-      `${selector}::before{content:${cssString(before)};${beforeFontFamily}font-size:1rem!important;}` +
-      afterRule,
-  );
-}
-
-function addReferenceReplacementRule(
-  entity: PageEntity,
-  parent: PageEntity,
-  rules: Map<string, string>,
-): void {
-  const fullRef = bracketedPageView(entity, parent);
-  const key = entityUuidValue(entity) ?? String(dbId(entity) ?? "");
-  const selectors = fullReferenceSelectors(entity);
-
-  if (!key || selectors.length === 0) return;
-
-  rules.set(`entity:${key}`, replacementDeclarations(selectors, fullRef).join("\n"));
-}
-
-function scopedReferenceSelectors(scopes: string[], refs: string[]): string[] {
-  const selectors: string[] = [];
-
-  for (const scope of scopes) {
-    for (const ref of refs) {
-      selectors.push(`${scope} ${ref}`);
-    }
-  }
-
-  return selectors;
-}
-
-function addBlockStyleRule(
-  block: PageEntity,
-  entity: PageEntity,
-  parent: PageEntity,
-  rules: Map<string, string>,
-): void {
-  const prefix = pagePrefix(entity, parent);
-  const fullRef = bracketedPageView(entity, parent);
-  const blockKey = entityUuidValue(block) ?? String(dbId(block) ?? "");
-  const entityKey = entityUuidValue(entity) ?? String(dbId(entity) ?? pageTitle(entity));
-  const scopes = blockScopeSelectors(block);
-  const wrapperSelectors = scopedReferenceSelectors(scopes, wrapperReferenceSelectors(entity));
-  const titleSelectors = scopedReferenceSelectors(
-    scopes,
-    [
-      ...linkReferenceSelectors(entity).flatMap((selector) => [
-        `${selector} .page-ref`,
-        `${selector} .page-reference`,
-        `${selector} [data-ref]`,
-        `${selector} [data-ref-name]`,
-        `${selector} [data-page]`,
-        `${selector} [data-page-name]`,
-      ]),
-      ...titleReferenceSelectors(entity),
-    ],
-  );
-  const declarations: string[] = [];
-
-  if (!blockKey || !entityKey || !prefix || scopes.length === 0) return;
-
-  if (wrapperSelectors.length > 0) {
-    declarations.push(...replacementDeclarations(wrapperSelectors, fullRef));
-  }
-
-  if (titleSelectors.length > 0) {
-    declarations.push(
-      `${titleSelectors.map((selector) => `${selector}::before`).join(",")}{content:${cssString(prefix)};}`,
-    );
-  }
-
-  if (declarations.length > 0) {
-    rules.set(`block:${blockKey}:${entityKey}`, declarations.join("\n"));
-  }
-}
-
-function addTitleView(
-  title: string,
-  view: PageView,
-  nextByTitle: Map<string, PageView>,
-  titleConflicts: Set<string>,
-): void {
-  const key = normalizeTitle(title);
-  if (!key || titleConflicts.has(key)) return;
-
-  const existing = nextByTitle.get(key);
-  if (existing && existing.title !== view.title) {
-    nextByTitle.delete(key);
-    titleConflicts.add(key);
-    return;
-  }
-
-  nextByTitle.set(key, view);
-}
-
-function addView(
-  page: PageEntity,
-  view: PageView,
-  nextById: Map<number, PageView>,
-  nextByUuid: Map<string, PageView>,
-  nextByTitle: Map<string, PageView>,
-  titleConflicts: Set<string>,
-): void {
-  if (typeof page.id === "number") nextById.set(page.id, view);
-  const id = dbId(page);
-  const uuid = entityUuidValue(page);
-  if (typeof id === "number") nextById.set(id, view);
-  if (uuid) nextByUuid.set(uuid, view);
-
-  for (const title of pageTitleCandidates(page)) {
-    addTitleView(title, view, nextByTitle, titleConflicts);
-    addTitleView(lastPathSegment(title), view, nextByTitle, titleConflicts);
-  }
 }
 
 function flattenBlocks(blocks: unknown[]): PageEntity[] {
@@ -857,6 +522,32 @@ function queryEntities(result: unknown): PageEntity[] {
   return result
     .map((row) => (Array.isArray(row) ? row[0] : row))
     .filter((entity): entity is PageEntity => Boolean(entity && typeof entity === "object"));
+}
+
+function uniqueEntityKey(entity: PageEntity): string | undefined {
+  const uuid = entityUuidValue(entity);
+  if (uuid) return `uuid:${uuid}`;
+
+  const id = dbId(entity);
+  if (typeof id === "number") return `id:${id}`;
+
+  const title = pageTitle(entity);
+  return title ? `title:${title}` : undefined;
+}
+
+function uniqueEntities(entities: PageEntity[]): PageEntity[] {
+  const result: PageEntity[] = [];
+  const seen = new Set<string>();
+
+  for (const entity of entities) {
+    const key = uniqueEntityKey(entity);
+    if (key && seen.has(key)) continue;
+
+    if (key) seen.add(key);
+    result.push(entity);
+  }
+
+  return result;
 }
 
 async function currentPageBlocks(currentPage: PageEntity | undefined): Promise<PageEntity[]> {
@@ -909,103 +600,70 @@ async function visibleBlocks(): Promise<PageEntity[]> {
   return blocks;
 }
 
+async function addViewsFromBlocks(
+  blocks: PageEntity[],
+  views: Map<string, PageView>,
+  cache: Map<string, Promise<PageEntity | undefined>>,
+): Promise<void> {
+  for (const block of blocks) {
+    for (const ref of refsForBlock(block)) {
+      const referenced = await getPageByRef(ref, cache);
+      if (!referenced) continue;
+
+      const parent = await parentForEntity(referenced, cache);
+      if (!parent) continue;
+
+      addHostMarkerView(views, pageView(referenced, parent));
+    }
+  }
+}
+
 async function refreshReferenceViews(): Promise<void> {
   const version = ++refreshVersion;
   const currentPage = ((await logseq.Editor.getCurrentPage()) ?? undefined) as PageEntity | undefined;
 
-  const nextById = new Map<number, PageView>();
-  const nextByUuid = new Map<string, PageView>();
-  const nextByTitle = new Map<string, PageView>();
-  const nextStyleRules = new Map<string, string>();
   const nextHostMarkerViews = new Map<string, PageView>();
-  const titleConflicts = new Set<string>();
   const entityCache = new Map<string, Promise<PageEntity | undefined>>();
+  const blocks = currentPage ? await currentPageBlocks(currentPage) : [];
+  blocks.push(...await visibleBlocks());
 
-  if (currentPage) {
-    const blocks = await currentPageBlocks(currentPage);
-
-    for (const block of blocks) {
-      for (const ref of refsForBlock(block)) {
-        const referenced = await getPageByRef(ref, entityCache);
-        if (!referenced) continue;
-
-        const parent = await parentForEntity(referenced, entityCache);
-        if (!parent) continue;
-
-        const view = pageView(referenced, parent);
-        addView(referenced, view, nextById, nextByUuid, nextByTitle, titleConflicts);
-        addHostMarkerView(nextHostMarkerViews, view);
-        addPageReferenceTextRule(referenced, parent, nextStyleRules);
-      }
-    }
-  }
-
-  for (const block of await visibleBlocks()) {
-    for (const ref of refsForBlock(block)) {
-      const referenced = await getPageByRef(ref, entityCache);
-      if (!referenced) continue;
-
-      const parent = await parentForEntity(referenced, entityCache);
-      if (!parent) continue;
-
-      const view = pageView(referenced, parent);
-      addView(referenced, view, nextById, nextByUuid, nextByTitle, titleConflicts);
-      addHostMarkerView(nextHostMarkerViews, view);
-      addPageReferenceTextRule(referenced, parent, nextStyleRules);
-    }
-  }
-
-  try {
-    const parentedEntities = queryEntities(
-      await logseq.DB.datascriptQuery(ENTITIES_WITH_PARENT_QUERY),
-    );
-
-    for (const entity of parentedEntities) {
-      const parent = parentRef(entity) as PageEntity | undefined;
-      if (!parent || !pageTitle(parent)) continue;
-
-      const view = pageView(entity, parent);
-      addView(entity, view, nextById, nextByUuid, nextByTitle, titleConflicts);
-      addHostMarkerView(nextHostMarkerViews, view);
-      addPageReferenceTextRule(entity, parent, nextStyleRules);
-    }
-  } catch (error) {
-    console.warn("[logseq-library-display] failed to query parented entities", error);
-  }
+  await addViewsFromBlocks(uniqueEntities(blocks), nextHostMarkerViews, entityCache);
 
   if (version !== refreshVersion) return;
 
-  viewsById = nextById;
-  viewsByUuid = nextByUuid;
-  viewsByTitle = nextByTitle;
-  styleRulesByKey = nextStyleRules;
-  hostMarkerViews = Array.from(nextHostMarkerViews.values());
-  dataReady = true;
-  logseq.provideStyle(Array.from(styleRulesByKey.values()).join("\n"));
-  publishHostMarkerPayload();
+  const views = Array.from(nextHostMarkerViews.values());
+  publishHostMarkerPayload(views);
 
-  const hasViews =
-    viewsById.size > 0 ||
-    viewsByUuid.size > 0 ||
-    viewsByTitle.size > 0;
-
-  if (!hasViews && emptyRefreshRetries < 5) {
+  if (views.length === 0 && emptyRefreshRetries < 5) {
     emptyRefreshRetries += 1;
     scheduleRefresh(600 * emptyRefreshRetries);
-  } else if (hasViews) {
+  } else if (views.length > 0) {
     emptyRefreshRetries = 0;
   }
 }
 
 function runRefresh(): void {
   window.clearTimeout(refreshTimer);
+  if (refreshRunning) {
+    refreshQueued = true;
+    return;
+  }
+
+  refreshRunning = true;
   void refreshReferenceViews()
     .catch((error: unknown) => {
-    console.error("[logseq-library-display] failed to refresh", error);
+      console.error("[logseq-library-display] failed to refresh", error);
+    })
+    .finally(() => {
+      refreshRunning = false;
+      if (refreshQueued) {
+        refreshQueued = false;
+        scheduleRefresh();
+      }
     });
 }
 
-function scheduleRefresh(delay = 180): void {
+function scheduleRefresh(delay = 450): void {
   window.clearTimeout(refreshTimer);
   refreshTimer = window.setTimeout(runRefresh, delay);
 }
@@ -1041,21 +699,19 @@ function registerSettings(): void {
 
 async function boot(): Promise<void> {
   registerSettings();
+  logseq.provideStyle(HOST_MARKER_STYLE);
 
   offDbChanged = logseq.DB.onChanged(() => {
-    dataReady = false;
     emptyRefreshRetries = 0;
     scheduleRefresh();
   });
 
   offRouteChanged = logseq.App.onRouteChanged(() => {
-    dataReady = false;
     emptyRefreshRetries = 0;
     scheduleRefresh();
   });
 
   offSettingsChanged = logseq.onSettingsChanged(() => {
-    dataReady = false;
     emptyRefreshRetries = 0;
     scheduleRefresh();
   });
